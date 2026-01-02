@@ -9,6 +9,5 @@ PyMuPDF>=1.23.5
 tqdm>=4.66.1
 lxml>=4.9.3
 
-# TODO: Replace with notion-client once API migration is complete
-# For now, keeping existing unofficial API dependency
-notion-vzhd1701-fork==0.0.37
+# Official Notion API client
+notion-client>=2.7.0

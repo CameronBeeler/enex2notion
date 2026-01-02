@@ -7,9 +7,21 @@
 
 Easy way to import [Evernote's](https://www.evernote.com/) `*.enex` files to [Notion.so](https://notion.so)
 
-Notion's native Evernote importer doesn't do it for me, so I decided to write my own. Thanks to **Cobertos** and [md2notion](https://github.com/Cobertos/md2notion) for inspiration and **Jamie Alexandre** for [notion-py](https://github.com/jamalex/notion-py).
 
-You can either use Evernote native export or try out my other tool, [evernote-backup](https://github.com/vzhd1701/evernote-backup), to export `*.enex` files from Evernote.
+## Quick Start
+
+```bash
+# Clone and install
+git clone https://github.com/CameronBeeler/enex2notion.git
+cd enex2notion/
+pip install -r requirements.txt
+
+# Test (dry run - no upload)
+python -m enex2notion your_notebook.enex --verbose
+
+# Upload to Notion
+python -m enex2notion your_notebook.enex --token YOUR_TOKEN --summary summary.txt
+```
 
 ### What is preserved
 
@@ -71,17 +83,24 @@ $ docker run --rm -t -v "$PWD":/input vzhd1701/enex2notion:latest
 $ pip install --user enex2notion
 ```
 
-**Python 3.8 or later required.**
+**Python 3.12 or later required.**
 
 ### From source
 
-This project uses [poetry](https://python-poetry.org/) for dependency management and packaging. You will have to install it first. See [poetry official documentation](https://python-poetry.org/docs/) for instructions.
+This project uses standard Python packaging tools.
 
 ```shell
-$ git clone https://github.com/vzhd1701/enex2notion.git
+$ git clone https://github.com/CameronBeeler/enex2notion.git
 $ cd enex2notion/
-$ poetry install
-$ poetry run enex2notion
+$ pip install -r requirements.txt
+$ python -m enex2notion
+```
+
+**Or install in development mode:**
+
+```shell
+$ pip install -e .
+$ enex2notion
 ```
 
 ## Usage
@@ -110,6 +129,8 @@ optional arguments:
   --condense-lines           condense text lines together into paragraphs to avoid making block per line
   --condense-lines-sparse    like --condense-lines but leaves gaps between paragraphs
   --done-file FILE           file for uploaded notes hashes to resume interrupted upload
+  --failed-dir DIR           directory for failed note exports (default: current directory)
+  --summary FILE             save import summary report to file (always printed to console)
   --log FILE                 file to store program log
   --verbose                  output debug information
   --version                  show program's version number and exit
@@ -130,6 +151,21 @@ The program can run without `--token` provided though. It will not make any netw
 The upload will take some time since each note is uploaded block-by-block, so you'll probably need some way of resuming it. `--done-file` is precisely for that. All uploaded note hashes will be stored there, so the next time you start, the upload will continue from where you left off.
 
 All uploaded notebooks will appear under the automatically created `Evernote ENEX Import` page. You can change that name with the `--root-page` option. The program will mark unfinished notes with `[UNFINISHED UPLOAD]` text in the title. After successful upload, the mark will be removed.
+
+### Summary Reports & Failed Notes
+
+After import completion, a detailed summary report is displayed showing:
+- Total notes per notebook and overall
+- Success/failure/skip rates with percentages
+- Processing time
+- Locations of unimported notes directories
+
+Failed and skipped notes are automatically exported to `<notebook>_YYYYMMDD_HHMMSS_unimported/` directories as valid ENEX files that can be:
+- Re-imported after fixing issues
+- Inspected for debugging
+- Shared for troubleshooting
+
+Skipped notes include the skip reason as an HTML comment in the ENEX content. Use `--summary FILE` to save the report to a file, and `--failed-dir DIR` to specify where unimported notes should be saved.
 
 ### Upload modes
 
