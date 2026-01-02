@@ -119,6 +119,9 @@ def _convert_resource(resource_raw):
         logger.debug("Empty resource")
         data_bin = b""
     data_md5 = hashlib.md5(data_bin).hexdigest()
+    
+    # Extract source-url for images (may be remote URL or en-cache://)
+    source_url = res_attr.get("source-url", "")
 
     return EvernoteResource(
         data_bin=data_bin,
@@ -126,6 +129,7 @@ def _convert_resource(resource_raw):
         md5=data_md5,
         mime=file_mime,
         file_name=file_name,
+        source_url=source_url,
     )
 
 

@@ -79,6 +79,7 @@ def _parse_img_resource(bin_src: str):
         md5=img_md5,
         mime=img_data.media_type,
         file_name=f"{img_md5}{img_ext}",
+        source_url="",  # Inline data URI has no source URL
     )
 
 

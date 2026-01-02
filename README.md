@@ -16,11 +16,14 @@ git clone https://github.com/CameronBeeler/enex2notion.git
 cd enex2notion/
 pip install -r requirements.txt
 
+# Set up Notion Integration token (see below)
+export NOTION_TOKEN="secret_your_integration_token_here"
+
 # Test (dry run - no upload)
 python -m enex2notion your_notebook.enex --verbose
 
 # Upload to Notion
-python -m enex2notion your_notebook.enex --token YOUR_TOKEN --summary summary.txt
+python -m enex2notion your_notebook.enex --use-env --summary summary.txt
 ```
 
 ### What is preserved
@@ -114,9 +117,11 @@ Uploads ENEX files to Notion
 positional arguments:
   FILE/DIR                   ENEX files or directories to upload
 
-optional arguments:
+options:
   -h, --help                 show this help message and exit
-  --token TOKEN              Notion token, stored in token_v2 cookie for notion.so [NEEDED FOR UPLOAD]
+  --token TOKEN              Notion Integration token (create at https://www.notion.com/my-integrations). Can also use --use-env to read from NOTION_TOKEN environment variable.
+                             Example: export NOTION_TOKEN="secret_your_token_here" [NEEDED FOR UPLOAD]
+  --use-env                  use NOTION_TOKEN environment variable for authentication instead of --token argument
   --root-page NAME           root page name for the imported notebooks, it will be created if it does not exist (default: "Evernote ENEX Import")
   --mode {DB,PAGE}           upload each ENEX as database (DB) or page with children (PAGE) (default: DB)
   --mode-webclips {TXT,PDF}  convert web clips to text (TXT) or pdf (PDF) before upload (default: TXT)
@@ -140,11 +145,40 @@ optional arguments:
 
 You can pass single `*.enex` files or directories. The program will recursively scan directories for `*.enex` files.
 
-### Token & dry run mode
+### Integration Token & Authentication
 
-The upload requires you to have a `token_v2` cookie for the Notion website. For information on how to get it, see [this article](https://vzhd1701.notion.site/Find-Your-Notion-Token-5f57951434c1414d84ac72f88226eede).
+The upload requires a Notion Integration token. To set one up:
 
-The program can run without `--token` provided though. It will not make any network requests without it. Executing a dry run with `--verbose` is an excellent way to check if your `*.enex` files are parsed correctly before uploading.
+1. Go to https://www.notion.com/my-integrations
+2. Click "+ New integration"
+3. Give it a name (e.g., "enex2notion") and submit
+4. Copy the Integration token (starts with `secret_`)
+5. Create a page in Notion to import into
+6. Share that page with your Integration (via "..." menu → "Add connections")
+
+**Using Environment Variable (Recommended)**:
+
+```bash
+# For current session
+export NOTION_TOKEN="secret_your_integration_token_here"
+
+# To persist across sessions, add to shell profile:
+# For bash: add to ~/.bashrc or ~/.bash_profile
+# For zsh: add to ~/.zshrc
+echo 'export NOTION_TOKEN="secret_your_integration_token_here"' >> ~/.zshrc
+source ~/.zshrc
+
+# Use with --use-env flag
+python -m enex2notion notebook.enex --use-env
+```
+
+**Or pass token directly**:
+
+```bash
+python -m enex2notion notebook.enex --token secret_your_token_here
+```
+
+**Dry Run Mode**: The program can run without authentication. It will not make any network requests without a token. Executing a dry run with `--verbose` is an excellent way to check if your `*.enex` files are parsed correctly before uploading.
 
 ### Upload continuation
 

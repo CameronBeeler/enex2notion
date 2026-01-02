@@ -1,17 +1,15 @@
 from collections.abc import Iterable
 
-from notion.block import BasicBlock
-
 from enex2notion.notion_blocks.base import NotionBaseBlock
 from enex2notion.notion_blocks.text import TextProp
 from enex2notion.utils_rand_id import rand_id_list
 
 
-class TableBlock(BasicBlock):
+class TableBlock:
     _type = "table"
 
 
-class TableRowBlock(BasicBlock):
+class TableRowBlock:
     _type = "table_row"
 
 

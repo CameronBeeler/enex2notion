@@ -10,6 +10,7 @@ class EvernoteResource(object):
     md5: str
     mime: str
     file_name: str
+    source_url: str = ""  # Source URL from resource-attributes
 
 
 @dataclass

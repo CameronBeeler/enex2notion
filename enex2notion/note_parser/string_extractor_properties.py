@@ -51,7 +51,8 @@ def _resolve_span(tag: Tag):
 
 
 def _resolve_link(tag: Tag):
-    # TODO: resolve using note title or link list
-    if tag.get("href") and "evernote://" not in tag.get("href"):
+    # Return link data for all URLs, including evernote:// links
+    # Notion API validation happens later in the conversion process
+    if tag.get("href"):
         return "a", tag["href"]
     return None

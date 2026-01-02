@@ -1,4 +1,5 @@
 import argparse
+import os
 from pathlib import Path
 
 from enex2notion.version import __version__
@@ -25,8 +26,17 @@ def parse_args(argv):
         },
         "--token": {
             "help": (
-                "Notion token, stored in token_v2 cookie for notion.so"
+                "Notion Integration token (create at https://www.notion.com/my-integrations)."
+                " Can also use --use-env to read from NOTION_TOKEN environment variable."
+                " Example: export NOTION_TOKEN=\"secret_your_token_here\""
                 " [NEEDED FOR UPLOAD]"
+            ),
+        },
+        "--use-env": {
+            "action": "store_true",
+            "help": (
+                "use NOTION_TOKEN environment variable for authentication"
+                " instead of --token argument"
             ),
         },
         "--root-page": {
@@ -140,4 +150,19 @@ def parse_args(argv):
     for arg, arg_params in schema.items():
         parser.add_argument(arg, **arg_params)
 
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+
+    # Handle environment variable token
+    if args.use_env:
+        env_token = os.environ.get("NOTION_TOKEN")
+        if not env_token:
+            parser.error(
+                "--use-env specified but NOTION_TOKEN environment variable is not set.\n"
+                "Set it with: export NOTION_TOKEN=\"secret_your_token_here\""
+            )
+        args.token = env_token
+    elif not args.token and "NOTION_TOKEN" in os.environ:
+        # Auto-detect if not explicitly specified
+        args.token = os.environ["NOTION_TOKEN"]
+
+    return args

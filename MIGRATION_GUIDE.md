@@ -75,15 +75,30 @@ The Integration needs access to pages/databases:
 
 **Note**: You must share the root page. The tool will create child pages/databases under it.
 
-### Step 2.3: Test Integration Token
+### Step 2.3: Set Up Environment Variable (Recommended)
+
+For security and convenience, use the `NOTION_TOKEN` environment variable:
 
 ```bash
-export NOTION_TOKEN="your_integration_token_here"
+# For current session (bash/zsh)
+export NOTION_TOKEN="secret_your_integration_token_here"
+
+# To persist across sessions, add to your shell profile:
+# For bash: ~/.bashrc or ~/.bash_profile
+# For zsh: ~/.zshrc
+echo 'export NOTION_TOKEN="secret_your_integration_token_here"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+### Step 2.4: Test Integration Token
+
+```bash
 python -c "
 from notion_client import Client
-client = Client(auth='$NOTION_TOKEN')
+import os
+client = Client(auth=os.environ['NOTION_TOKEN'])
 result = client.users.me()
-print(f'✅ Authenticated as: {result[\"name\"]}')
+print(f'✅ Authenticated as: {result.get(\"name\", \"Integration\")} (type: {result.get(\"type\")})')
 "
 ```
 
@@ -800,6 +815,20 @@ python -m enex2notion your_test.enex --verbose
 3. Get page URL
 
 ### Step 10.5: Test Upload
+
+With environment variable (recommended):
+
+```bash
+# Make sure NOTION_TOKEN is set
+export NOTION_TOKEN="secret_YOUR_TOKEN_HERE"
+
+python -m enex2notion your_test.enex \
+  --use-env \
+  --verbose \
+  --summary summary.txt
+```
+
+Or with direct token:
 
 ```bash
 python -m enex2notion your_test.enex \

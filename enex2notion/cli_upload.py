@@ -15,31 +15,67 @@ from enex2notion.utils_static import Rules
 logger = logging.getLogger(__name__)
 
 
+
 class DoneFile(object):
+    """Tracks uploaded notes and created databases to support resume.
+    
+    Format:
+    - Lines starting with 'DB:' store database mappings: DB:notebook_name:database_id
+    - Other lines are note hashes (40 char hex strings)
+    """
     def __init__(self, path: Path):
         self.path = path
+        self.done_hashes = set()
+        self.databases = {}  # notebook_name -> database_id
 
         try:
             with open(path, "r") as f:
-                self.done_hashes = {line.strip() for line in f}
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("DB:"):
+                        # Parse database mapping: DB:notebook_name:database_id
+                        parts = line.split(":", 2)
+                        if len(parts) == 3:
+                            notebook_name = parts[1]
+                            database_id = parts[2]
+                            self.databases[notebook_name] = database_id
+                    elif line:  # Note hash
+                        self.done_hashes.add(line)
         except FileNotFoundError:
-            self.done_hashes = set()
+            pass  # File doesn't exist yet, start fresh
 
     def __contains__(self, note_hash):
         return note_hash in self.done_hashes
 
     def add(self, note_hash):
+        """Add a successfully uploaded note hash."""
         self.done_hashes.add(note_hash)
 
         with open(self.path, "a") as f:
             f.write(f"{note_hash}\n")
+    
+    def get_database(self, notebook_name):
+        """Get the database ID for a notebook, if it exists.
+        
+        Returns:
+            Database ID string, or None if not found
+        """
+        return self.databases.get(notebook_name)
+    
+    def add_database(self, notebook_name, database_id):
+        """Record a database creation for a notebook."""
+        self.databases[notebook_name] = database_id
+        
+        with open(self.path, "a") as f:
+            f.write(f"DB:{notebook_name}:{database_id}\n")
 
 
 class EnexUploader(object):
     def __init__(
-        self, import_root, mode: str, done_file: Path | None, rules: Rules, failed_export_dir: Path | None = None
+        self, wrapper, root_id, mode: str, done_file: Path | None, rules: Rules, failed_export_dir: Path | None = None
     ):
-        self.import_root = import_root
+        self.wrapper = wrapper  # NotionAPIWrapper instance
+        self.root_id = root_id  # Root page ID string
         self.mode = mode
 
         self.rules = rules
@@ -48,6 +84,7 @@ class EnexUploader(object):
         self.failed_export_dir = failed_export_dir or Path.cwd()
 
         self.notebook_root = None
+        self.notebook_schema = None  # Store database schema if in DB mode
 
     def upload_notebook(self, enex_file: Path) -> NotebookStats:
         """Process a single notebook using single-pass parsing.
@@ -77,7 +114,16 @@ class EnexUploader(object):
 
         # Phase 3: Get or create notebook root
         try:
-            self.notebook_root = self._get_notebook_root(notebook_name)
+            result = self._get_notebook_root(notebook_name)
+            # Handle tuple return for DB mode (id, schema) or just id for PAGE mode
+            if self.mode == "DB" and isinstance(result, tuple):
+                self.notebook_root, self.notebook_schema = result
+                # Store database ID in done file for future runs
+                if isinstance(self.done_hashes, DoneFile):
+                    self.done_hashes.add_database(notebook_name, self.notebook_root)
+            else:
+                self.notebook_root = result
+                self.notebook_schema = None
         except NoteUploadFailException:
             if not self.rules.skip_failed:
                 raise
@@ -87,7 +133,7 @@ class EnexUploader(object):
 
         # Phase 4: Upload successfully parsed notes
         successful_results = [r for r in parse_stats.results if not r.failed and r.note]
-        skipped_results = []  # Track skipped notes for export
+        skipped_results = []  # Track skipped notes for export (excludes already-uploaded)
 
         for idx, result in enumerate(successful_results, 1):
             note = result.note
@@ -97,9 +143,10 @@ class EnexUploader(object):
                 notebook_stats.successful += 1
             elif upload_result == "skipped":
                 notebook_stats.skipped += 1
-                # Add skip reason to result for export
-                result.skip_reason = skip_reason
-                skipped_results.append(result)
+                # Only export notes that were skipped due to errors, not already-uploaded notes
+                if skip_reason and "Already uploaded" not in skip_reason:
+                    result.skip_reason = skip_reason
+                    skipped_results.append(result)
             elif upload_result == "failed":
                 notebook_stats.failed += 1
 
@@ -119,6 +166,7 @@ class EnexUploader(object):
                         export_failed_note(result, notebook_stats.failed_directory, notebook_name, "skipped")
                     except Exception as e:
                         logger.error(f"Failed to export skipped note: {e}")
+
 
         return notebook_stats
 
@@ -181,24 +229,43 @@ class EnexUploader(object):
             return []
 
     def _get_notebook_root(self, notebook_title):
-        if self.import_root is None:
+        if self.wrapper is None:
             return None
+
+        # Check if we already have a database ID cached from a previous run
+        if self.mode == "DB" and isinstance(self.done_hashes, DoneFile):
+            cached_db_id = self.done_hashes.get_database(notebook_title)
+            if cached_db_id:
+                logger.info(f"Using existing database from progress file: {cached_db_id}")
+                # Fetch the schema for the existing database
+                try:
+                    database = self.wrapper.get_database(cached_db_id)
+                    schema = database.get("properties", {})
+                    logger.debug(f"Retrieved schema with {len(schema)} properties")
+                    return (cached_db_id, schema)
+                except Exception as e:
+                    logger.warning(f"Failed to retrieve cached database {cached_db_id}: {e}")
+                    logger.warning("Will search for or create a new database")
+                    # Continue to normal search/create flow
 
         error_message = f"Failed to get notebook root for '{notebook_title}'"
         get_func = get_notebook_database if self.mode == "DB" else get_notebook_page
 
         return self._attempt_upload(
-            get_func, error_message, self.import_root, notebook_title
+            get_func, error_message, self.wrapper, self.root_id, notebook_title
         )
 
     def _upload_note(self, notebook_root, note, note_blocks):
         self._attempt_upload(
             upload_note,
             f"Failed to upload note '{note.title}' to Notion",
+            self.wrapper,
             notebook_root,
             note,
             note_blocks,
             self.rules.keep_failed,
+            is_database=(self.mode == "DB"),
+            database_schema=self.notebook_schema,
         )
 
     def _attempt_upload(self, upload_func, error_message, *args, **kwargs):

@@ -1,4 +1,4 @@
-from notion import block
+from enex2notion import notion_block_types as block
 
 from enex2notion.notion_blocks.embeddable import NotionEmbedBlock
 
