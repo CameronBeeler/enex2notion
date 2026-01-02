@@ -112,6 +112,16 @@ def parse_args(argv):
             "metavar": "FILE",
             "help": "file for uploaded notes hashes to resume interrupted upload",
         },
+        "--failed-dir": {
+            "type": Path,
+            "metavar": "DIR",
+            "help": "directory for failed note exports (default: current directory)",
+        },
+        "--summary": {
+            "type": Path,
+            "metavar": "FILE",
+            "help": "save import summary report to file (always printed to console)",
+        },
         "--log": {
             "type": Path,
             "metavar": "FILE",

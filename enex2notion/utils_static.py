@@ -1,6 +1,5 @@
 from argparse import Namespace
 from dataclasses import dataclass
-from typing import Optional
 
 
 @dataclass
@@ -12,7 +11,7 @@ class Rules(object):
     condense_lines: bool
     condense_lines_sparse: bool
 
-    tag: Optional[str]
+    tag: str | None
 
     retry: int
     skip_failed: bool

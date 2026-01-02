@@ -1,10 +1,9 @@
 import logging
 import warnings
 from pathlib import Path
-from typing import Optional
 
 
-def setup_logging(is_verbose: bool, log_file: Optional[Path]):
+def setup_logging(is_verbose: bool, log_file: Path | None):
     logging.basicConfig(format="%(levelname)s: %(message)s")
 
     logging.getLogger("enex2notion").setLevel(

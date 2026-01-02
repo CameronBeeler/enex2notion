@@ -1,5 +1,4 @@
 import re
-from typing import List
 
 from bs4 import Tag
 
@@ -30,7 +29,7 @@ def group_blocks_by_indent(root: Tag):
     return blocks
 
 
-def is_indentation_inconsistent(paragraphs: List[Tag]):
+def is_indentation_inconsistent(paragraphs: list[Tag]):
     """Evernote has strict indentation margin of 40px"""
 
     indent_level = 0
@@ -62,7 +61,7 @@ def parse_indent_level(element: Tag):
 
 # https://stackoverflow.com/a/24966533/13100286
 def parse_indented(  # noqa: WPS210, WPS231, C901
-    paragraphs: List[Tag], indent_level: int = None
+    paragraphs: list[Tag], indent_level: int = None
 ):
     """Builds paragraphs tree using indentation levels"""
 
@@ -100,7 +99,7 @@ def parse_indented(  # noqa: WPS210, WPS231, C901
     return result_node
 
 
-def parse_indented_plain(paragraphs: List[Tag]):
+def parse_indented_plain(paragraphs: list[Tag]):
     result_lines = []
 
     for cur_paragraph in paragraphs:

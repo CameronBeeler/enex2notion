@@ -5,16 +5,17 @@ import mimetypes
 import re
 import uuid
 from datetime import datetime
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Iterator
 
 from dateutil.parser import isoparse
 
 from enex2notion.enex_parser_xml import (
     iter_process_xml_elements,
     iter_xml_elements_as_dict,
+    iter_xml_elements_with_raw,
 )
-from enex2notion.enex_types import EvernoteNote, EvernoteResource
+from enex2notion.enex_types import EvernoteNote, EvernoteResource, NoteParseResult, ParseStats
 
 logger = logging.getLogger(__name__)
 
@@ -145,3 +146,37 @@ def _is_banned_extension(filename):
         "xex",
         "xpi",
     }
+
+
+def parse_all_notes(enex_file: Path) -> ParseStats:
+    """Parse all notes from ENEX file in a single pass.
+
+    Returns ParseStats with all results including raw XML for failed notes.
+    This eliminates the need for separate count_notes() and iter_notes() calls.
+    """
+    stats = ParseStats()
+
+    for note_raw, raw_xml in iter_xml_elements_with_raw(enex_file, "note"):
+        stats.total += 1
+
+        try:
+            note = _process_note(note_raw)
+            result = NoteParseResult(
+                note=note, raw_xml=raw_xml, error=None, parse_success=True
+            )
+            stats.successful += 1
+        except Exception as e:
+            logger.warning(f"Failed to parse note: {e}")
+            logger.debug(f"Parse error details", exc_info=e)
+            result = NoteParseResult(
+                note=None, raw_xml=raw_xml, error=e, parse_success=False
+            )
+            stats.failed += 1
+
+        stats.results.append(result)
+
+    logger.debug(
+        f"Parsed {stats.total} notes: {stats.successful} successful, {stats.failed} failed"
+    )
+
+    return stats

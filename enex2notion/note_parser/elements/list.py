@@ -1,5 +1,4 @@
 import logging
-from typing import List
 
 from bs4 import NavigableString, PageElement, Tag
 
@@ -18,7 +17,7 @@ logger = logging.getLogger(__name__)
 
 class ListNodes(object):
     def __init__(self, is_ul: bool):
-        self.nodes: List[NotionBaseBlock] = []
+        self.nodes: list[NotionBaseBlock] = []
         self.is_ul = is_ul
 
     def add_li(self, subelement: Tag) -> None:
@@ -46,7 +45,7 @@ class ListNodes(object):
         self.nodes.append(li_odd_item)
 
 
-def parse_list(element: Tag) -> List[NotionBaseBlock]:
+def parse_list(element: Tag) -> list[NotionBaseBlock]:
     is_ul = element.name == "ul"
 
     list_nodes = ListNodes(is_ul)

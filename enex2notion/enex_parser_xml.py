@@ -1,6 +1,7 @@
 from collections import defaultdict
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any
 
 from lxml import etree
 from lxml.etree import XMLSyntaxError, _Entity
@@ -8,18 +9,31 @@ from lxml.etree import XMLSyntaxError, _Entity
 
 def iter_xml_elements_as_dict(
     xml_file: Path, tag_name: str
-) -> Iterator[Dict[str, Any]]:
+) -> Iterator[dict[str, Any]]:
     yield from iter_process_xml_elements(
         xml_file, tag_name, lambda e: _etree_to_dict(e)[tag_name]
     )
+
+
+def iter_xml_elements_with_raw(
+    xml_file: Path, tag_name: str
+) -> Iterator[tuple[dict[str, Any], str]]:
+    """Iterate XML elements, yielding both parsed dict and raw XML string."""
+
+    def callback(elem):
+        raw_xml = etree.tostring(elem, encoding="unicode")
+        parsed = _etree_to_dict(elem)[tag_name]
+        return (parsed, raw_xml)
+
+    yield from iter_process_xml_elements(xml_file, tag_name, callback)
 
 
 def iter_process_xml_elements(
     xml_file: Path,
     tag_name: str,
     element_callback: Callable[[Any], Any],
-    error_callback: Optional[Callable[[Path, List[str]], None]] = None,
-) -> Iterator[Dict[str, Any]]:
+    error_callback: Callable[[Path, list[str]], None] | None = None,
+) -> Iterator[dict[str, Any]]:
     with open(xml_file, "rb") as f:
         context = etree.iterparse(
             f,
@@ -49,7 +63,7 @@ def iter_process_xml_elements(
 
 
 # https://stackoverflow.com/a/10077069/13100286
-def _etree_to_dict(t) -> Dict[str, Any]:  # noqa: WPS210, WPS231, C901
+def _etree_to_dict(t) -> dict[str, Any]:  # noqa: WPS210, WPS231, C901
     d = {t.tag: {} if t.attrib else None}
 
     children = list(c for c in t if not isinstance(c, _Entity))
@@ -96,9 +110,9 @@ def _handle_bad_unicode_attr(obj, attr):
         return getattr(obj, attr)
     except UnicodeDecodeError as e:
         return e.object.decode("utf-8", "ignore")
-    except:  # pragma: no cover
+    except Exception:  # pragma: no cover
         return ""
 
 
-def _format_error_list(file_name, error_log) -> List[str]:
+def _format_error_list(file_name, error_log) -> list[str]:
     return [f"{file_name}:{e.line}:{e.column}:{e.message}" for e in error_log]

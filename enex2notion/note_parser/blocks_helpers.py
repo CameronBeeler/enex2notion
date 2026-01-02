@@ -1,5 +1,3 @@
-from typing import List
-
 from bs4 import Tag
 
 BLOCK_TAGS = (
@@ -74,7 +72,7 @@ def flatten_root(root: Tag):
         d.extract()
 
 
-def _group_inline_tags(elements: List[Tag]):
+def _group_inline_tags(elements: list[Tag]):
     blocks = []
     group = []
 
@@ -96,7 +94,7 @@ def _group_inline_tags(elements: List[Tag]):
     return blocks
 
 
-def _make_block(elements: List[Tag]):
+def _make_block(elements: list[Tag]):
     """Make a single block from a list of elements"""
 
     block = Tag(name="div")

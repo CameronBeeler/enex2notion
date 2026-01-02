@@ -1,12 +1,11 @@
 import copy
-from typing import List, Union
 
 from bs4 import NavigableString, PageElement, Tag
 
 STANDALONES = ("h1", "h2", "h3", "div")
 
 
-def split_tag(tag: Tag) -> List[Tag]:
+def split_tag(tag: Tag) -> list[Tag]:
     """
     Element is either a single div itself or a collection of div or h1-3 "lines"
     it can also contain random inline strings, so we group them in separate lines
@@ -18,7 +17,7 @@ def split_tag(tag: Tag) -> List[Tag]:
     return [tag]
 
 
-def _split_line(element: Tag) -> List[Tag]:
+def _split_line(element: Tag) -> list[Tag]:
     blocks = []
     group = []
 
@@ -45,11 +44,11 @@ def _is_whitespace(element: PageElement) -> bool:
     return isinstance(element, NavigableString) and not element.text.strip()
 
 
-def _is_inline(element: Union[Tag, PageElement]) -> bool:
+def _is_inline(element: Tag | PageElement) -> bool:
     return not isinstance(element, Tag) or element.name not in STANDALONES
 
 
-def _make_block(elements: List[Union[Tag, PageElement]]) -> Tag:
+def _make_block(elements: list[Tag | PageElement]) -> Tag:
     """Make a single block from a list of elements"""
 
     block = Tag(name="div")

@@ -1,5 +1,4 @@
 import logging
-from typing import List
 
 from bs4 import NavigableString, Tag
 
@@ -20,7 +19,7 @@ from enex2notion.notion_blocks.text import NotionTextBlock, TextProp
 logger = logging.getLogger(__name__)
 
 
-def parse_note_blocks(note: Tag) -> List[NotionBaseBlock]:
+def parse_note_blocks(note: Tag) -> list[NotionBaseBlock]:
     flatten_root(note)
 
     extract_nested_blocks(note)

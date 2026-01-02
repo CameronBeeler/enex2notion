@@ -1,5 +1,4 @@
 import logging
-from typing import Optional
 
 from bs4 import BeautifulSoup, Tag
 
@@ -36,7 +35,7 @@ def parse_note(note: EvernoteNote, rules: Rules):
     return note_blocks
 
 
-def _parse_note_dom(note: EvernoteNote) -> Optional[Tag]:
+def _parse_note_dom(note: EvernoteNote) -> Tag | None:
     # Using html.parser because Evernote enml2 is basically HTML
     note_dom = BeautifulSoup(note.content, "html.parser").find("en-note")
 

@@ -1,138 +1,43 @@
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
 
-[tool.poetry]
-name = "enex2notion"
-version = "0.3.1"
+[project]
+name = "enex2notion2026"
+version = "1.0.0"
 description = "Import Evernote ENEX files to Notion"
-authors = ["vzhd1701 <vzhd1701@gmail.com>"]
 readme = "README.md"
-include = ["CHANGELOG.md"]
-license = "MIT"
-repository = "https://github.com/vzhd1701/enex2notion"
-keywords = ["evernote", "enex", "notion", "import"]
+requires-python = ">=3.12"
+license = {text = "MIT"}
+authors = [
+    {name = "CameronBeeler", email = "cameron.beeler@icloud.com"}
+]
+keywords = ["evernote", "notion", "enex", "import", "converter"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: End Users/Desktop",
-    "Natural Language :: English",
-    "Environment :: Console",
-    "Operating System :: MacOS",
-    "Operating System :: Microsoft",
-    "Operating System :: Unix",
-    "Topic :: Internet",
-    "Topic :: Terminals",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
     "Topic :: Utilities",
 ]
 
-[tool.poetry.urls]
-"Changelog" = "https://github.com/vzhd1701/enex2notion/blob/master/CHANGELOG.md"
+[project.urls]
+Homepage = "https://github.com/CameronBeeler/enex2notion"
+Repository = "https://github.com/CameronBeeler/enex2notion"
+Issues = "https://github.com/CameronBeeler/enex2notion/issues"
 
-[tool.poetry.scripts]
+[project.scripts]
 enex2notion = "enex2notion.cli:main"
 
-[tool.poetry.dependencies]
-python = "^3.8"
-beautifulsoup4 = "^4.12.2"
-python-dateutil = "^2.8.2"
-requests = "^2.31.0"
-w3lib = "^2.1.2"
-tinycss2 = "^1.2.1"
-pdfkit = "^1.0.0"
-PyMuPDF = "^1.23.5"
-notion-vzhd1701-fork = "0.0.37"
-tqdm = "^4.66.1"
-lxml = "^4.9.3"
-
-[tool.poetry.group.test]
-optional = true
-
-[tool.poetry.group.test.dependencies]
-pytest = "^7.4.2"
-pytest-cov = "^4.1.0"
-pytest-mock = "^3.11.1"
-pyfakefs = "^5.3.0"
-pytest-vcr = "^1.0.2"
-
-[tool.poetry.group.dev]
-optional = true
-
-[tool.poetry.group.dev.dependencies]
-pre-commit = "^3.5.0"
-black = "^23.10.0"
-isort = "^5.12.0"
-mdformat = "0.7.17"
-flakeheaven = "^3.3.0"
-wemake-python-styleguide = "^0.17.0"
-flake8 = "^4.0.1"
-mypy = "^1.6.1"
-
-[tool.flakeheaven]
-base = "https://raw.githubusercontent.com/wemake-services/wemake-python-styleguide/master/styles/flakeheaven.toml"
-extended_default_ignore=[]
-max_line_length = 88
-exclude = [
-    "tests/*.py",
-]
-
-[tool.flakeheaven.plugins]
-# Disabled [personal preference]
-# WPS111 short names
-# WPS305 forbids f-strings
-# WPS326 implicit line concat
-# Docstings, don't have any
-# WPS226 String constant overuse
-
-# Exceptions [false positives & formatting]
-# C812 trailing comma <- handled by black
-# E203 whitespace before : <- handled by black
-# W503 Line break occurred before a binary operator
-# WPS317 Indentation for parameters <- handled by black
-# WPS323 `%` string formatting, log format
-
-# Bandit
-# S303 md5 is used for en-media hash
-# S314, S405 ElementTree
-
-pycodestyle = ["+*", "-E203", "-W503"]
-flake8-bandit = ["+*", "-S303", "-S314", "-S405"]
-flake8-commas = ["+*", "-C812"]
-flake8-quotes = ["+*", "-Q000"]
-flake8-rst-docstrings = ["-*"]
-flake8-docstrings = ["-*"]
-flake8-darglint = ["-*"]
-wemake-python-styleguide = ["+*", "-WPS111", "-WPS226", "-WPS305", "-WPS317", "-WPS323", "-WPS326"]
-
-[tool.flakeheaven.exceptions."enex2notion/version.py"]
-# I like it this way
-wemake-python-styleguide = ["-WPS410"]
-
 [tool.black]
-line-length = 88
+line-length = 120
 
-[tool.isort]
-profile = "black"
-skip_gitignore = true
+[tool.ruff]
+line-length = 120
 
-[tool.coverage]
-    [tool.coverage.report]
-    show_missing = true
-    exclude_lines = [
-        # Have to re-enable the standard pragma
-        'pragma: no cover',
-
-        # Don't complain about missing debug-only code:
-        'def __repr__',
-        'if self\.debug',
-
-        # Don't complain if tests don't hit defensive assertion code:
-        'raise AssertionError',
-        'raise NotImplementedError',
-
-        # Don't complain if non-runnable code isn't run:
-        'if 0:',
-        'if __name__ == .__main__.:'
-    ]
-    omit = [
-        '*/tests/*'
-    ]
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true

@@ -1,5 +1,3 @@
-from typing import List
-
 from enex2notion.notion_blocks.base import NotionBaseBlock
 from enex2notion.notion_blocks.text import NotionTextBlock, TextProp
 
@@ -45,7 +43,7 @@ class LineCondenser(object):
             self.solid_block = b
 
 
-def condense_lines(blocks: List[NotionBaseBlock], is_sparse=False):
+def condense_lines(blocks: list[NotionBaseBlock], is_sparse=False):
     condenser = LineCondenser(is_sparse)
 
     blocks = _join_empty_paragraphs(blocks)
@@ -57,7 +55,7 @@ def condense_lines(blocks: List[NotionBaseBlock], is_sparse=False):
     return _strip_paragraphs(condenser.final_blocks)
 
 
-def _strip_paragraphs(blocks: List[NotionBaseBlock]):
+def _strip_paragraphs(blocks: list[NotionBaseBlock]):
     result_blocks = []
 
     for b in blocks:
@@ -69,7 +67,7 @@ def _strip_paragraphs(blocks: List[NotionBaseBlock]):
     return result_blocks
 
 
-def _join_empty_paragraphs(blocks: List[NotionBaseBlock]):
+def _join_empty_paragraphs(blocks: list[NotionBaseBlock]):
     result_blocks = []
     gap_started = False
 

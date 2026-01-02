@@ -1,0 +1,14 @@
+# Runtime dependencies for enex2notion
+beautifulsoup4>=4.12.2
+python-dateutil>=2.8.2
+requests>=2.31.0
+w3lib>=2.1.2
+tinycss2>=1.2.1
+pdfkit>=1.0.0
+PyMuPDF>=1.23.5
+tqdm>=4.66.1
+lxml>=4.9.3
+
+# TODO: Replace with notion-client once API migration is complete
+# For now, keeping existing unofficial API dependency
+notion-vzhd1701-fork==0.0.37
