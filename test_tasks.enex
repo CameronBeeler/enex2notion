@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE en-export SYSTEM "http://xml.evernote.com/pub/evernote-export4.dtd">
+<en-export>
+  <note>
+    <title>Task Test</title>
+    <created>20240101T120000Z</created>
+    <updated>20240101T120000Z</updated>
+    <note-attributes>
+      <author>Test User</author>
+    </note-attributes>
+    <content>
+      <![CDATA[<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<!DOCTYPE en-note SYSTEM "http://xml.evernote.com/pub/enml2.dtd">
+<en-note>
+<div>Regular task list:</div>
+<ul style="--en-todo:true;">
+<li style="--en-checked:false;"><div>Unchecked task 1</div></li>
+<li style="--en-checked:true;"><div>Checked task 1</div></li>
+<li style="--en-checked:false;"><div>Unchecked task 2</div></li>
+</ul>
+<div>Regular bulleted list (not tasks):</div>
+<ul>
+<li><div>Bullet 1</div></li>
+<li><div>Bullet 2</div></li>
+</ul>
+<div>Nested tasks:</div>
+<ul style="--en-todo:true;">
+<li style="--en-checked:false;"><div>Parent task</div></li>
+<ul style="--en-todo:true;">
+<li style="--en-checked:false;"><div>Child task 1</div></li>
+<li style="--en-checked:true;"><div>Child task 2 (done)</div></li>
+</ul>
+</ul>
+</en-note>
+      ]]>
+    </content>
+  </note>
+</en-export>

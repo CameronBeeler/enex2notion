@@ -1,0 +1,356 @@
+"""Link resolver for converting evernote:// references to Notion page links.
+
+This module provides functionality to:
+1. Find evernote:// links in Notion block content
+2. Match link text to actual page names
+3. Generate updated rich_text with proper Notion URLs
+"""
+import logging
+import re
+from dataclasses import dataclass
+from difflib import SequenceMatcher
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# Block types that can contain rich_text content
+RICH_TEXT_BLOCK_TYPES = {
+    "paragraph",
+    "heading_1",
+    "heading_2",
+    "heading_3",
+    "bulleted_list_item",
+    "numbered_list_item",
+    "to_do",
+    "quote",
+    "callout",
+    "toggle",
+}
+
+# Regex pattern to match markdown-style evernote:// links: [text](evernote://...)
+EVERNOTE_LINK_PATTERN = re.compile(r'\[([^\]]+)\]\(evernote://[^\)]+\)')
+
+
+@dataclass
+class LinkReference:
+    """Reference to an evernote:// link found in a block.
+    
+    Attributes:
+        page_id: ID of the page containing the block
+        page_title: Title of the page containing the block
+        block_id: ID of the block containing the link
+        block_type: Type of block (e.g., 'paragraph', 'heading_1')
+        link_text: Display text from the markdown link [text](url)
+        original_url: Full evernote:// URL
+        rich_text_index: Index in the rich_text array where the link appears
+        rich_text_item: The full rich_text item containing the link
+    """
+    page_id: str
+    page_title: str
+    block_id: str
+    block_type: str
+    link_text: str
+    original_url: str
+    rich_text_index: int
+    rich_text_item: dict[str, Any]
+
+
+def find_evernote_links_in_page(
+    page_id: str, page_title: str, blocks: list[dict[str, Any]]
+) -> list[LinkReference]:
+    """Find all evernote:// links in a page's blocks.
+    
+    Args:
+        page_id: ID of the page
+        page_title: Title of the page
+        blocks: List of block objects from the page
+    
+    Returns:
+        List of LinkReference objects for each link found
+    """
+    links = []
+    
+    for block in blocks:
+        block_links = _scan_block_for_links(page_id, page_title, block)
+        links.extend(block_links)
+        
+        # Recursively scan nested children
+        if "_children" in block:
+            nested_links = find_evernote_links_in_page(page_id, page_title, block["_children"])
+            links.extend(nested_links)
+    
+    return links
+
+
+def _scan_block_for_links(
+    page_id: str, page_title: str, block: dict[str, Any]
+) -> list[LinkReference]:
+    """Scan a single block for evernote:// links.
+    
+    Detects two formats:
+    1. Markdown format: [text](evernote://...) - created by enex2notion
+    2. Rich text with link: text content + link.url = evernote://... - created by Notion's importer
+    
+    Args:
+        page_id: ID of the page containing the block
+        page_title: Title of the page
+        block: Block object to scan
+    
+    Returns:
+        List of LinkReference objects found in this block
+    """
+    block_type = block.get("type")
+    block_id = block.get("id")
+    
+    if not block_type or block_type not in RICH_TEXT_BLOCK_TYPES:
+        return []
+    
+    # Get rich_text array from the block
+    block_content = block.get(block_type, {})
+    rich_text_array = block_content.get("rich_text", [])
+    
+    if not rich_text_array:
+        return []
+    
+    links = []
+    
+    for idx, rich_text_item in enumerate(rich_text_array):
+        # Check if this is a text item
+        if rich_text_item.get("type") != "text":
+            continue
+        
+        text_content = rich_text_item.get("text", {}).get("content", "")
+        link_obj = rich_text_item.get("text", {}).get("link")
+        
+        # FORMAT 1: Check for rich text with evernote:// link (Notion's official importer)
+        if link_obj and link_obj.get("url", "").startswith("evernote://"):
+            evernote_url = link_obj["url"]
+            
+            links.append(LinkReference(
+                page_id=page_id,
+                page_title=page_title,
+                block_id=block_id,
+                block_type=block_type,
+                link_text=text_content,  # The display text
+                original_url=evernote_url,
+                rich_text_index=idx,
+                rich_text_item=rich_text_item,
+            ))
+            
+            logger.debug(f"Found evernote:// rich_text link in {block_type}: '{text_content}' -> {evernote_url}")
+        
+        # FORMAT 2: Look for markdown-style evernote:// links in the text (enex2notion)
+        matches = EVERNOTE_LINK_PATTERN.findall(text_content)
+        
+        if matches:
+            # Get the full match to extract the URL
+            full_matches = EVERNOTE_LINK_PATTERN.finditer(text_content)
+            for match in full_matches:
+                link_text = match.group(1)  # The text inside [text]
+                full_match = match.group(0)  # The full [text](url)
+                
+                # Extract the URL from the full match
+                url_match = re.search(r'evernote://[^\)]+', full_match)
+                original_url = url_match.group(0) if url_match else ""
+                
+                links.append(LinkReference(
+                    page_id=page_id,
+                    page_title=page_title,
+                    block_id=block_id,
+                    block_type=block_type,
+                    link_text=link_text,
+                    original_url=original_url,
+                    rich_text_index=idx,
+                    rich_text_item=rich_text_item,
+                ))
+                
+                logger.debug(f"Found evernote:// markdown link in {block_type}: [{link_text}]({original_url})")
+    
+    return links
+
+
+def match_link_to_page(
+    link_text: str,
+    page_map: dict[str, str],
+    match_mode: str = "case-insensitive"
+) -> tuple[str | None, float]:
+    """Match link text to a page in the page map.
+    
+    Args:
+        link_text: Text from the markdown link [text]
+        page_map: Dictionary mapping page titles to page IDs
+        match_mode: Matching strategy:
+            - "exact": Case-sensitive exact match
+            - "case-insensitive": Case-insensitive exact match
+            - "fuzzy": Fuzzy matching with similarity threshold
+    
+    Returns:
+        Tuple of (matched_page_id, confidence_score) or (None, 0.0) if no match
+        Confidence is 1.0 for exact matches, < 1.0 for fuzzy matches
+    """
+    # Try exact match first (case-sensitive)
+    if link_text in page_map:
+        return page_map[link_text], 1.0
+    
+    # Try case-insensitive match
+    if match_mode in ("case-insensitive", "fuzzy"):
+        link_text_lower = link_text.lower()
+        for page_title, page_id in page_map.items():
+            if page_title.lower() == link_text_lower:
+                return page_id, 1.0
+    
+    # Try fuzzy matching
+    if match_mode == "fuzzy":
+        best_match = None
+        best_score = 0.0
+        threshold = 0.85  # 85% similarity threshold
+        
+        link_text_lower = link_text.lower()
+        
+        for page_title, page_id in page_map.items():
+            page_title_lower = page_title.lower()
+            
+            # Calculate similarity
+            similarity = SequenceMatcher(None, link_text_lower, page_title_lower).ratio()
+            
+            if similarity > best_score and similarity >= threshold:
+                best_score = similarity
+                best_match = page_id
+        
+        if best_match:
+            return best_match, best_score
+    
+    return None, 0.0
+
+
+def create_updated_rich_text(
+    original_rich_text: list[dict[str, Any]],
+    link_index: int,
+    link_text: str,
+    notion_url: str
+) -> list[dict[str, Any]]:
+    """Create updated rich_text array with evernote:// link replaced by Notion link.
+    
+    Handles two formats:
+    1. Rich text with evernote:// link - just updates the URL
+    2. Markdown format [text](evernote://...) - converts to proper rich text link
+    
+    Args:
+        original_rich_text: Original rich_text array from the block
+        link_index: Index of the rich_text item containing the evernote link
+        link_text: The link text (what was inside [text])
+        notion_url: Notion URL to link to
+    
+    Returns:
+        Updated rich_text array with proper Notion link
+    """
+    # Clone the rich_text array (deep copy to avoid modifying nested dicts)
+    updated_rich_text = []
+    for item in original_rich_text:
+        item_copy = item.copy()
+        if "text" in item_copy:
+            item_copy["text"] = item_copy["text"].copy()
+            if "link" in item_copy["text"]:
+                item_copy["text"]["link"] = item_copy["text"]["link"].copy()
+        if "annotations" in item_copy:
+            item_copy["annotations"] = item_copy["annotations"].copy()
+        updated_rich_text.append(item_copy)
+    
+    if link_index >= len(updated_rich_text):
+        logger.error(f"Invalid link_index {link_index} for rich_text array of length {len(updated_rich_text)}")
+        return original_rich_text
+    
+    # Get the item to update
+    item = updated_rich_text[link_index]
+    
+    if item.get("type") != "text":
+        logger.error(f"Cannot update non-text rich_text item at index {link_index}")
+        return original_rich_text
+    
+    # Get the text content and link
+    text_content = item.get("text", {}).get("content", "")
+    existing_link = item.get("text", {}).get("link")
+    
+    # FORMAT 1: Rich text with evernote:// link - just update the URL
+    if existing_link and existing_link.get("url", "").startswith("evernote://"):
+        # Simply replace the URL
+        updated_rich_text[link_index]["text"]["link"] = {"url": notion_url}
+        logger.debug(f"Updated rich_text link from {existing_link['url']} to {notion_url}")
+        return updated_rich_text
+    
+    # FORMAT 2: Markdown pattern - convert to proper rich text link
+    if not EVERNOTE_LINK_PATTERN.search(text_content):
+        logger.error(f"No evernote:// link found in text: {text_content}")
+        return original_rich_text
+    
+    # Create a new rich_text item with the link text and proper Notion URL
+    updated_item = {
+        "type": "text",
+        "text": {
+            "content": link_text,
+            "link": {"url": notion_url}
+        },
+        "annotations": item.get("annotations", {
+            "bold": False,
+            "italic": False,
+            "strikethrough": False,
+            "underline": False,
+            "code": False,
+            "color": "default"
+        })
+    }
+    
+    # Handle cases where the markdown link is part of a larger text string
+    # For simplicity, we'll split the text into three parts: before, link, after
+    match = EVERNOTE_LINK_PATTERN.search(text_content)
+    if match:
+        start_pos = match.start()
+        end_pos = match.end()
+        
+        before_text = text_content[:start_pos]
+        after_text = text_content[end_pos:]
+        
+        # Build new rich_text array segment
+        new_items = []
+        
+        # Add "before" text if present
+        if before_text:
+            new_items.append({
+                "type": "text",
+                "text": {"content": before_text},
+                "annotations": item.get("annotations", {})
+            })
+        
+        # Add the linked text
+        new_items.append(updated_item)
+        
+        # Add "after" text if present
+        if after_text:
+            new_items.append({
+                "type": "text",
+                "text": {"content": after_text},
+                "annotations": item.get("annotations", {})
+            })
+        
+        # Replace the original item with the new items
+        updated_rich_text = (
+            updated_rich_text[:link_index] +
+            new_items +
+            updated_rich_text[link_index + 1:]
+        )
+    
+    return updated_rich_text
+
+
+def format_notion_page_url(page_id: str) -> str:
+    """Format a Notion page URL from a page ID.
+    
+    Args:
+        page_id: Page ID (with or without hyphens)
+    
+    Returns:
+        Formatted Notion URL
+    """
+    # Remove hyphens from page ID for URL format
+    clean_id = page_id.replace("-", "")
+    return f"https://notion.so/{clean_id}"
