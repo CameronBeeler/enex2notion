@@ -530,15 +530,15 @@ def _create_rich_text_object(text: str, formatting: list) -> dict[str, Any]:
             logger.debug(f"Adding link to text: {link_url}")
             rich_text_obj["text"]["link"] = {"url": link_url}
         else:
-            # Invalid URL for Notion - try markdown format as workaround
+            # Invalid URL for Notion - handle based on scheme
             if link_url.lower().startswith("evernote://"):
-                # Try markdown format [text](url) in case Notion parses it differently
-                # If this doesn't work, it will just appear as plain markdown text
-                rich_text_obj["text"]["content"] = f"⚠️ [{text}]({link_url})"
-                add_warning(f"Evernote internal link converted to text: {link_url[:80]}")
-                logger.debug(f"Converted evernote:// link to markdown: {link_url}")
+                # Evernote internal links: Convert to markdown format for future remapping
+                # This is NOT treated as an error - user will handle remapping separately
+                # No warning marker needed - link is preserved in markdown format
+                rich_text_obj["text"]["content"] = f"[{text}]({link_url})"
+                logger.debug(f"Converted evernote:// link to markdown (not an error): {link_url}")
             else:
-                # For other invalid URLs, keep text with warning marker
+                # Other invalid URLs: This IS an error - add warning marker and track as partial import
                 rich_text_obj["text"]["content"] = f"⚠️ {text}"
                 add_warning(f"Unsupported URL scheme removed: {link_url[:80]}")
                 logger.warning(f"Removed unsupported URL (keeping text): {link_url[:100]}")
