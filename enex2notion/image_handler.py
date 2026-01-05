@@ -80,6 +80,8 @@ def upload_image_to_notion(resource, notion_api, rejected_tracker=None, notebook
 
     # Retry logic with exponential backoff for transient errors
     max_retries = 3
+    last_exception = None
+    
     for attempt in range(max_retries):
         try:
             # Upload to Notion using Direct Upload API
@@ -91,6 +93,7 @@ def upload_image_to_notion(resource, notion_api, rejected_tracker=None, notebook
             logger.debug(f"  Uploaded as file_upload ID: {upload_id}")
             return upload_id
         except Exception as e:
+            last_exception = e
             is_last_attempt = (attempt == max_retries - 1)
             
             # Check if it's a transient error worth retrying
@@ -106,16 +109,12 @@ def upload_image_to_notion(resource, notion_api, rejected_tracker=None, notebook
                 time.sleep(wait_time)
                 continue
             
-            # Last attempt or permanent error - handle it
-            e = e  # Keep the exception for the outer except block
+            # Last attempt or permanent error - break and handle below
             break
     
-    # If we get here, all retries failed
-    try:
-        # This will use the last exception from the loop
-        raise e
-    except Exception as e:
-        error_msg = str(e)
+    # If we get here, all retries failed - handle the last exception
+    if last_exception:
+        error_msg = str(last_exception)
         # Check if it's an unsupported extension error from Notion API
         if "extension that is not supported" in error_msg:
             reason = f"Rejected by Notion API: Extension '{file_ext}' not supported"
@@ -135,9 +134,9 @@ def upload_image_to_notion(resource, notion_api, rejected_tracker=None, notebook
                 )
         else:
             # Generic upload failure - add warning and track
-            reason = f"Upload failed: {str(e)[:100]}"
-            add_warning(f"File upload failed: '{filename}' - {str(e)[:80]}")
-            logger.error(f"Failed to upload image {filename}: {e}")
+            reason = f"Upload failed: {str(last_exception)[:100]}"
+            add_warning(f"File upload failed: '{filename}' - {str(last_exception)[:80]}")
+            logger.error(f"Failed to upload image {filename}: {last_exception}")
             if rejected_tracker:
                 rejected_tracker.add_rejected_file(
                     notebook_name=notebook_name,
@@ -146,6 +145,7 @@ def upload_image_to_notion(resource, notion_api, rejected_tracker=None, notebook
                     reason=reason,
                     file_extension=file_ext,
                 )
-        return None
+    
+    return None
 
 
