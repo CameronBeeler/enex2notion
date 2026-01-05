@@ -104,9 +104,9 @@ def export_failed_note(
     export_date = datetime.now().strftime("%Y%m%dT%H%M%SZ")
     enex_content = ENEX_HEADER.format(export_date=export_date)
     
-    # Inject skip reason into note content if available
-    if result.skip_reason and suffix == "skipped":
-        modified_xml = _inject_skip_reason(result.raw_xml, result.skip_reason)
+    # Inject skip/error reason into note content if available
+    if result.skip_reason:
+        modified_xml = _inject_skip_reason(result.raw_xml, result.skip_reason, suffix)
         enex_content += modified_xml
     else:
         enex_content += result.raw_xml
@@ -154,15 +154,16 @@ def export_all_failed_notes(
     return unimported_dir
 
 
-def _inject_skip_reason(raw_xml: str, skip_reason: str) -> str:
-    """Inject skip reason as an XML comment at the beginning of note content.
+def _inject_skip_reason(raw_xml: str, skip_reason: str, suffix: str = "skipped") -> str:
+    """Inject skip/error reason as an XML comment at the beginning of note content.
 
     Args:
         raw_xml: Original note XML
-        skip_reason: Reason the note was skipped
+        skip_reason: Reason the note was skipped or error message
+        suffix: Type of export ('skipped' or 'failed')
 
     Returns:
-        Modified XML with skip reason comment
+        Modified XML with skip/error reason comment
     """
     try:
         import xml.etree.ElementTree as ET
@@ -170,9 +171,10 @@ def _inject_skip_reason(raw_xml: str, skip_reason: str) -> str:
         # Parse the XML
         root = ET.fromstring(raw_xml)
 
-        # Create comment with skip reason
+        # Create comment with skip/error reason
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        comment_text = f"\n=== SKIPPED BY ENEX2NOTION ===\nTimestamp: {timestamp}\nReason: {skip_reason}\n=== END SKIP REASON ===\n"
+        header = "SKIPPED" if suffix == "skipped" else "FAILED"
+        comment_text = f"\n=== {header} BY ENEX2NOTION ===\nTimestamp: {timestamp}\nReason: {skip_reason}\n=== END ===\n"
 
         # Find content element
         content_elem = root.find("content")

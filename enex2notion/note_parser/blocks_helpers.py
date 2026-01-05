@@ -110,10 +110,11 @@ def _is_element_has_direct_blocks(element):
 
 
 def _is_div_special_block(element: Tag):
-    """Evernote has 3 special blocks that don't have their own tag:
+    """Evernote has special blocks that don't have their own tag:
     1. Code blocks
-    2. Task
+    2. Task groups
     3. Google drive links
+    4. Embedded webclips
     """
 
     div_style = element.get("style", "")
@@ -125,6 +126,7 @@ def _is_div_special_block(element: Tag):
         "en-codeblock",
         "en-task-group",
         "en-richlink",
+        "en-clipped-content",
     )
 
     return any(block_style in div_style for block_style in special_block_styles)

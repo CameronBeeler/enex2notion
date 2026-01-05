@@ -28,7 +28,8 @@ class NotionAPIWrapper:
         Args:
             auth_token: Notion Integration token (starts with secret_)
         """
-        self.client = Client(auth=auth_token)
+        # Increase timeout for large file uploads (default is 60s)
+        self.client = Client(auth=auth_token, timeout_ms=300000)  # 5 minutes
         self._auth_token = auth_token  # Store for raw API calls
         self._rate_limit_delay = 0.35  # ~3 requests/second
 
@@ -225,6 +226,177 @@ class NotionAPIWrapper:
         time.sleep(self._rate_limit_delay)
         return self.client.databases.retrieve(database_id=database_id)
 
+    def get_blocks(self, block_id: str, page_size: int = 100) -> list[dict[str, Any]]:
+        """Retrieve all blocks from a page/block with pagination.
+
+        Args:
+            block_id: Parent block/page ID
+            page_size: Number of blocks per page (max 100)
+
+        Returns:
+            List of all block objects (recursively includes nested children)
+        """
+        all_blocks = []
+        start_cursor = None
+
+        while True:
+            time.sleep(self._rate_limit_delay)
+
+            params = {"block_id": block_id, "page_size": min(page_size, 100)}
+            if start_cursor:
+                params["start_cursor"] = start_cursor
+
+            try:
+                response = self.client.blocks.children.list(**params)
+                blocks = response.get("results", [])
+                all_blocks.extend(blocks)
+
+                # Check for nested children
+                for block in blocks:
+                    if block.get("has_children"):
+                        # Recursively get children
+                        nested = self.get_blocks(block["id"], page_size)
+                        # Store nested children in the block
+                        block["_children"] = nested
+
+                # Check if there are more pages
+                if not response.get("has_more"):
+                    break
+
+                start_cursor = response.get("next_cursor")
+            except APIResponseError as e:
+                logger.error(f"Failed to retrieve blocks from {block_id}: {e}")
+                raise
+
+        return all_blocks
+
+    def update_block(self, block_id: str, block_data: dict[str, Any]) -> dict[str, Any]:
+        """Update an existing block.
+
+        Args:
+            block_id: Block ID to update
+            block_data: Block data to update (e.g., {'paragraph': {'rich_text': [...]}})
+
+        Returns:
+            Updated block object
+        """
+        time.sleep(self._rate_limit_delay)
+
+        try:
+            return self.client.blocks.update(block_id=block_id, **block_data)
+        except APIResponseError as e:
+            logger.error(f"Failed to update block {block_id}: {e}")
+            raise
+
+    def list_all_pages_recursive(
+        self, root_id: str, title_map: dict[str, str] | None = None
+    ) -> dict[str, str]:
+        """Recursively collect all pages and database records under a root page.
+
+        Args:
+            root_id: Root page ID to start traversal
+            title_map: Existing title map to add to (for recursion)
+
+        Returns:
+            Dictionary mapping page title to page ID: {"Page Title": "page_id"}
+        """
+        if title_map is None:
+            title_map = {}
+
+        try:
+            # Get the root page itself
+            time.sleep(self._rate_limit_delay)
+            root_page = self.client.pages.retrieve(page_id=root_id)
+            root_title = _extract_page_title(root_page)
+            if root_title:
+                title_map[root_title] = root_id
+
+            # Get all child blocks/pages
+            blocks = self.get_blocks(root_id)
+
+            for block in blocks:
+                block_type = block.get("type")
+
+                # Check if this block is a child page
+                if block_type == "child_page":
+                    child_id = block["id"]
+                    child_title = block.get("child_page", {}).get("title", "")
+                    if child_title:
+                        title_map[child_title] = child_id
+                    # Recurse into child page
+                    self.list_all_pages_recursive(child_id, title_map)
+
+                # Check if this block is a child database
+                elif block_type == "child_database":
+                    db_id = block["id"]
+                    db_title = block.get("child_database", {}).get("title", "")
+                    if db_title:
+                        title_map[db_title] = db_id
+                    # Get all pages (records) in the database
+                    self._list_database_pages(db_id, title_map)
+
+        except APIResponseError as e:
+            logger.warning(f"Failed to traverse page {root_id}: {e}")
+
+        return title_map
+
+    def _list_database_pages(self, database_id: str, title_map: dict[str, str]):
+        """List all pages in a database and add to title map.
+
+        Args:
+            database_id: Database ID
+            title_map: Title map to add pages to
+        """
+        start_cursor = None
+
+        while True:
+            time.sleep(self._rate_limit_delay)
+
+            # Use raw requests API because notion-client's data_sources.query() 
+            # doesn't work with database IDs in the current API version
+            headers = {
+                "Authorization": f"Bearer {self._auth_token}",
+                "Content-Type": "application/json",
+                "Notion-Version": NOTION_API_VERSION,
+            }
+            
+            payload = {"page_size": 100}
+            if start_cursor:
+                payload["start_cursor"] = start_cursor
+
+            try:
+                response = requests.post(
+                    f"https://api.notion.com/v1/databases/{database_id}/query",
+                    headers=headers,
+                    json=payload,
+                    timeout=30,
+                )
+                
+                if response.status_code != 200:
+                    error_data = response.json() if response.text else {}
+                    logger.warning(f"Failed to query database {database_id}: {error_data.get('message', response.text)}")
+                    break
+                
+                data = response.json()
+                pages = data.get("results", [])
+
+                for page in pages:
+                    page_id = page["id"]
+                    page_title = _extract_page_title(page)
+                    if page_title:
+                        title_map[page_title] = page_id
+                    # Recurse into database page to find any nested content
+                    self.list_all_pages_recursive(page_id, title_map)
+
+                # Check if there are more pages
+                if not data.get("has_more"):
+                    break
+
+                start_cursor = data.get("next_cursor")
+            except Exception as e:
+                logger.warning(f"Failed to query database {database_id}: {e}")
+                break
+
     def upload_file(self, file_data: bytes, filename: str, mime_type: str) -> str:
         """Upload file to Notion using Direct Upload API.
 
@@ -291,7 +463,7 @@ class NotionAPIWrapper:
             f"https://api.notion.com/v1/file_uploads/{upload_id}/send",
             headers=send_headers,
             files={"file": (filename, file_data, mime_type)},
-            timeout=60,
+            timeout=300,  # 5 minutes for large PDFs
         )
         
         if send_response.status_code != 200:
@@ -322,22 +494,24 @@ def create_notebook_database_schema() -> dict[str, Any]:
         "URL": {"url": {}},
         "Created": {"date": {}},
         "Updated": {"date": {}},
+        "Partial Import": {"checkbox": {}},  # Flag for notes with import failures
     }
 
 
-def note_to_database_properties(note, database_schema: dict[str, Any] | None = None) -> dict[str, Any]:
+def note_to_database_properties(note, database_schema: dict[str, Any] | None = None, partial_import: bool = False) -> dict[str, Any]:
     """Convert EvernoteNote to database row properties.
 
     Args:
         note: EvernoteNote object
         database_schema: Optional existing database schema to adapt to
+        partial_import: If True, marks the note as having import failures
 
     Returns:
         Properties dict for page creation in database
     """
     # If we have the database schema, use its actual property names
     if database_schema:
-        return _adapt_to_database_schema(note, database_schema)
+        return _adapt_to_database_schema(note, database_schema, partial_import)
     
     # Default properties for new database
     props = {
@@ -352,17 +526,22 @@ def note_to_database_properties(note, database_schema: dict[str, Any] | None = N
     
     if note.tags:
         props["Tags"] = {"multi_select": [{"name": tag} for tag in note.tags]}
+    
+    # Mark as partial import if there were failures
+    if partial_import:
+        props["Partial Import"] = {"checkbox": True}
 
     return props
 
 
-def _adapt_to_database_schema(note, database_schema: dict[str, Any]) -> dict[str, Any]:
+def _adapt_to_database_schema(note, database_schema: dict[str, Any], partial_import: bool = False) -> dict[str, Any]:
     """Adapt note properties to match existing database schema.
 
     Args:
         note: EvernoteNote object
         database_schema: Database properties schema from Notion API
                         Format: {"PropertyName": {"title": {}}} or {"PropertyName": {"type": "title", ...}}
+        partial_import: If True, marks the note as having import failures
 
     Returns:
         Properties dict adapted to the database schema
@@ -405,5 +584,31 @@ def _adapt_to_database_schema(note, database_schema: dict[str, Any]) -> dict[str
                 props[prop_name] = {"date": {"start": note.updated.isoformat()}}
         elif prop_type == "multi_select" and note.tags:
             props[prop_name] = {"multi_select": [{"name": tag} for tag in note.tags]}
+        elif prop_type == "checkbox" and "partial" in prop_name.lower() and "import" in prop_name.lower():
+            # Handle Partial Import checkbox
+            props[prop_name] = {"checkbox": partial_import}
     
     return props
+
+
+def _extract_page_title(page: dict[str, Any]) -> str:
+    """Extract title from a page object.
+
+    Args:
+        page: Page object from Notion API
+
+    Returns:
+        Page title string, or empty string if not found
+    """
+    # Try to get title from properties (for pages in databases or regular pages)
+    properties = page.get("properties", {})
+    
+    # Find the title property (could be named "Name", "title", etc.)
+    for prop_name, prop_value in properties.items():
+        prop_type = prop_value.get("type")
+        if prop_type == "title":
+            title_array = prop_value.get("title", [])
+            if title_array and len(title_array) > 0:
+                return title_array[0].get("plain_text", "")
+    
+    return ""

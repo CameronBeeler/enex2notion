@@ -58,6 +58,7 @@ def _process_note(note_raw: dict) -> EvernoteNote:
         author=note_raw["note-attributes"].get("author") or "",
         url=note_raw["note-attributes"].get("source-url") or "",
         is_webclip=_is_webclip(note_raw),
+        is_email=_is_email(note_raw),
         resources=_parse_resources(note_raw),
     )
 
@@ -72,21 +73,33 @@ def _parse_resources(note_raw):
 
 
 def _is_webclip(note_raw: dict):
+    """Detect if note is a pure webclip (not mixed content).
+    
+    Only returns True for notes that are ENTIRELY a webclip with no other content.
+    Mixed-content notes (user notes + embedded webclips) should return False,
+    so they're processed block-by-block instead of converted to PDF/TXT wholesale.
+    """
     note_attrs = note_raw.get("note-attributes") or {}
+    content = note_raw.get("content", "")
 
+    # Check if explicitly marked as web.clip source (but be conservative)
     if "web.clip" in note_attrs.get("source", ""):
-        return True
-    if "webclipper" in note_attrs.get("source-application", ""):
-        return True
+        # Only if it ONLY contains webclip content (no user-added content)
+        # Check for either --en-clipped-content or -evernote-webclip styles
+        if re.search(r'<en-note>\s*<div[^>]+(--en-clipped-content|-evernote-webclip)', content):
+            return True
+    
+    # Don't treat notes with webclipper source-application as pure webclips
+    # These often have mixed content (user notes + embedded clips)
+    # The embedded clips will be handled at the element level instead
+    
+    return False
 
-    if not note_raw.get("content"):
-        return False
 
-    return bool(
-        re.search(
-            '<div[^>]+style="[^"]+en-clipped-content[^"]*"', note_raw.get("content", "")
-        )
-    )
+def _is_email(note_raw: dict):
+    """Detect if note is an email based on source attribute."""
+    note_attrs = note_raw.get("note-attributes") or {}
+    return note_attrs.get("source", "") == "mail.smtp"
 
 
 def _convert_resource(resource_raw):

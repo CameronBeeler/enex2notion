@@ -98,6 +98,13 @@ def _parse_list_item(list_item, is_ul):
     li_text = extract_string(list_item)
 
     if is_ul:
+        # Check if this is a todo item based on style attribute
+        style = list_item.get("style", "")
+        if "--en-checked:" in style:
+            is_checked = "--en-checked:true" in style
+            return NotionTodoBlock(text_prop=li_text, checked=is_checked)
+        
+        # Legacy format: check for en-todo tag
         todo = list_item.find("en-todo")
         if todo:
             is_checked = todo.get("checked") == "true"

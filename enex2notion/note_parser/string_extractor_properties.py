@@ -13,6 +13,7 @@ def resolve_string_properties(tags: list[Tag]):
         "i": lambda e: ("i",),
         "u": lambda e: ("_",),
         "s": lambda e: ("s",),
+        "code": lambda e: ("c",),
         "span": _resolve_span,
         "a": _resolve_link,
     }

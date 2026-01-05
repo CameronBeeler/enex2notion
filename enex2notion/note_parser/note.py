@@ -8,31 +8,61 @@ from enex2notion.note_parser.note_post_process_resources import resolve_resource
 from enex2notion.note_parser.note_type_based import parse_note_blocks_based_on_type
 from enex2notion.notion_blocks.container import NotionCalloutBlock
 from enex2notion.notion_blocks.text import TextProp
+from enex2notion.parse_warnings import init_warnings, get_warnings, clear_warnings
 from enex2notion.utils_static import Rules
 
 logger = logging.getLogger(__name__)
 
 
-def parse_note(note: EvernoteNote, rules: Rules):
-    note_dom = _parse_note_dom(note)
-    if note_dom is None:
-        return []
+def parse_note(note: EvernoteNote, rules: Rules) -> tuple[list, list[str]]:
+    """Parse Evernote note into Notion blocks.
+    
+    Args:
+        note: EvernoteNote object
+        rules: Parsing rules
+        
+    Returns:
+        Tuple of (blocks, errors) where:
+        - blocks: List of successfully parsed NotionBaseBlock objects
+        - errors: List of error/warning messages for partial imports
+    """
+    # Initialize warnings collection for this parse operation
+    clear_warnings()
+    init_warnings()
+    
+    errors = []
+    
+    try:
+        note_dom = _parse_note_dom(note)
+        if note_dom is None:
+            errors.append("Failed to parse note content - invalid HTML structure")
+            return [], errors
 
-    note_blocks = parse_note_blocks_based_on_type(
-        note, note_dom, rules.add_pdf_preview, rules.mode_webclips
-    )
+        note_blocks = parse_note_blocks_based_on_type(
+            note, note_dom, note.is_email
+        )
 
-    if rules.condense_lines_sparse:
-        note_blocks = condense_lines(note_blocks, is_sparse=True)
-    elif rules.condense_lines:
-        note_blocks = condense_lines(note_blocks)
+        if rules.condense_lines_sparse:
+            note_blocks = condense_lines(note_blocks, is_sparse=True)
+        elif rules.condense_lines:
+            note_blocks = condense_lines(note_blocks)
 
-    if rules.add_meta:
-        _add_meta(note_blocks, note)
+        if rules.add_meta:
+            _add_meta(note_blocks, note)
 
-    resolve_resources(note_blocks, note)
+        resolve_resources(note_blocks, note)
+        
+        # Collect any warnings from parsing phase
+        warnings = get_warnings()
+        if warnings:
+            errors.extend(warnings)
 
-    return note_blocks
+        return note_blocks, errors
+    
+    except Exception as e:
+        errors.append(f"Unexpected error during parsing: {str(e)}")
+        # Return whatever blocks were created before the error
+        return [], errors
 
 
 def _parse_note_dom(note: EvernoteNote) -> Tag | None:

@@ -32,6 +32,7 @@ python -m enex2notion your_notebook.enex --use-env --summary summary.txt
   - nested images will appear after paragraph
 - Text formatting (**bold**, _italic_, etc) and colors
 - Tables are converted to the new format (no colspans though)
+- Tasks
 - Web Clips
   - as plain text or PDFs, see [below](#web-clips)
 - Everything else basically
@@ -41,7 +42,6 @@ python -m enex2notion your_notebook.enex --use-env --summary summary.txt
 - Paragraph alignment
 - Subscript and superscript formatting
 - Custom fonts and font sizes
-- Tasks
 - Encrypted blocks
   - just decrypt them before export
 
@@ -124,18 +124,13 @@ options:
   --use-env                  use NOTION_TOKEN environment variable for authentication instead of --token argument
   --root-page NAME           root page name for the imported notebooks, it will be created if it does not exist (default: "Evernote ENEX Import")
   --mode {DB,PAGE}           upload each ENEX as database (DB) or page with children (PAGE) (default: DB)
-  --mode-webclips {TXT,PDF}  convert web clips to text (TXT) or pdf (PDF) before upload (default: TXT)
-  --retry N                  retry N times on note upload error before giving up, 0 for infinite retries (default: 5)
-  --skip-failed              skip notes that failed to upload (after exhausting --retry attempts), by default the program will crash on upload error
-  --keep-failed              keep partial pages at Notion with '[UNFINISHED UPLOAD]' in title if they fail to upload completely, by default the program will try to delete them on upload fail
-  --add-pdf-preview          include preview image with PDF webclips for gallery view thumbnail (works only with --mode-webclips=PDF)
   --add-meta                 include metadata (created, tags, etc) in notes, makes sense only with PAGE mode
   --tag TAG                  add custom tag to uploaded notes
   --condense-lines           condense text lines together into paragraphs to avoid making block per line
   --condense-lines-sparse    like --condense-lines but leaves gaps between paragraphs
   --done-file FILE           file for uploaded notes hashes to resume interrupted upload
-  --failed-dir DIR           directory for failed note exports (default: current directory)
   --summary FILE             save import summary report to file (always printed to console)
+  --rejected-files FILE      save rejected/unsupported files report to CSV file
   --log FILE                 file to store program log
   --verbose                  output debug information
   --version                  show program's version number and exit
@@ -186,20 +181,35 @@ The upload will take some time since each note is uploaded block-by-block, so yo
 
 All uploaded notebooks will appear under the automatically created `Evernote ENEX Import` page. You can change that name with the `--root-page` option. The program will mark unfinished notes with `[UNFINISHED UPLOAD]` text in the title. After successful upload, the mark will be removed.
 
-### Summary Reports & Failed Notes
+### Summary Reports & Partial Imports
 
 After import completion, a detailed summary report is displayed showing:
 - Total notes per notebook and overall
 - Success/failure/skip rates with percentages
 - Processing time
-- Locations of unimported notes directories
 
-Failed and skipped notes are automatically exported to `<notebook>_YYYYMMDD_HHMMSS_unimported/` directories as valid ENEX files that can be:
-- Re-imported after fixing issues
-- Inspected for debugging
-- Shared for troubleshooting
+#### Partial Import System
 
-Skipped notes include the skip reason as an HTML comment in the ENEX content. Use `--summary FILE` to save the report to a file, and `--failed-dir DIR` to specify where unimported notes should be saved.
+**Every Evernote note creates a Notion page**, even if import errors occur. Notes with import errors are marked as "partial imports" with:
+
+1. **Inline error callout** at the top of the page listing what failed
+2. **Source URL bookmark** (for web clips) so you can access the original
+3. **"Partial Import" checkbox** set to `true` in database mode
+4. **Exception tracking** - An "Exceptions" page is created under your root page with links to all partially imported notes organized by notebook
+
+**Setting up Exception View (DB mode only)**:
+
+To easily filter partial imports in your database:
+
+1. Open the database in Notion
+2. Click "+ New view" → "Table"
+3. Name it "Exceptions"
+4. Add filter: "Partial Import" → "is" → "Checked"
+5. (Optional) On default Table view: hover over Name column footer → "Calculate" → "Count All"
+
+**Note**: Database views must be created manually in Notion - the API does not support programmatic view creation.
+
+Use `--summary FILE` to save the import report to a file.
 
 ### Upload modes
 
@@ -232,6 +242,102 @@ The `--condense-lines` option is helpful if you want to save up some space and m
 The `--condense-lines-sparse` does the same thing as `--condense-lines`, but leaves gaps between paragraphs. [Example](https://imgur.com/a/OBzeqn7).
 
 The `--tag` option allows you to add a custom tag to all uploaded notes. It will add this tag to existing tags if the note already has any.
+
+## Resolving Evernote Links
+
+After importing your notes, you may have internal Evernote links (`evernote://` URLs) that are broken. The `resolve-links` command finds these links and replaces them with working Notion page links.
+
+### What Links Are Resolved
+
+The tool handles two formats of evernote:// links:
+
+1. **Markdown format**: `[text](evernote://...)` - created by enex2notion
+2. **Rich text links**: Text with `evernote://` URL - created by Notion's official importer
+
+### Basic Usage
+
+```shell
+# Resolve all links (requires authentication)
+$ enex2notion --resolve-links --use-env
+
+# Or with token directly
+$ enex2notion --resolve-links --token secret_your_token_here
+```
+
+### Command Options
+
+```
+--token TOKEN          Notion Integration token [REQUIRED]
+--use-env              Use NOTION_TOKEN environment variable
+--root-page NAME       Root page to scan (default: "Evernote ENEX Import")
+--page NAME            Analyze only a specific page by name
+--page-list FILE       Path to page list cache file (JSON)
+--match-mode MODE      Matching strategy: exact, case-insensitive, fuzzy
+                       (default: case-insensitive)
+--dry-run              Show matches without updating links
+--summary FILE         Save resolution report to file
+--verbose              Show detailed match information
+--log FILE             Save program log to file
+```
+
+### Page List Caching
+
+For large imports, collecting all page names can take time. Use `--page-list` to cache the page map:
+
+```shell
+# First run: scan Notion and save page list
+$ enex2notion --resolve-links --use-env --page-list pages.json
+
+# Subsequent runs: load from cache (much faster)
+$ enex2notion --resolve-links --use-env --page-list pages.json
+```
+
+### Analyzing a Single Page
+
+To test or fix links in one page:
+
+```shell
+# Analyze a specific page
+$ enex2notion --resolve-links --use-env --page "My Note Title" --dry-run
+
+# Update links in that page
+$ enex2notion --resolve-links --use-env --page "My Note Title"
+```
+
+### Matching Strategies
+
+- **exact**: Case-sensitive exact match (most strict)
+- **case-insensitive**: Ignores case differences (default, recommended)
+- **fuzzy**: Uses similarity matching for close matches (most lenient)
+
+```shell
+# Use fuzzy matching for approximate matches
+$ enex2notion --resolve-links --use-env --match-mode fuzzy
+```
+
+### Example Workflow
+
+```shell
+# 1. Import your notes
+$ enex2notion --use-env my_notebooks/
+
+# 2. Scan and cache all page names
+$ enex2notion --resolve-links --use-env --page-list pages.json --dry-run
+
+# 3. Review the report, then update links
+$ enex2notion --resolve-links --use-env --page-list pages.json --summary report.txt
+
+# 4. Fix unmatched links for a specific page
+$ enex2notion --resolve-links --use-env --page "Problematic Note" --match-mode fuzzy
+```
+
+### Understanding the Report
+
+The resolution report shows:
+- Total pages scanned and pages with evernote:// links
+- Matched links (successfully resolved)
+- Unmatched links (link text doesn't match any page)
+- For unmatched links: suggestions for manual resolution
 
 ## Examples
 

@@ -6,8 +6,9 @@ from enex2notion.cli_args import parse_args
 from enex2notion.cli_logging import setup_logging
 from enex2notion.cli_notion import get_root
 from enex2notion.cli_requirements import validate_python_version, validate_requirements, check_optional_tools
+from enex2notion.cli_resolve_links import resolve_links_command
 from enex2notion.cli_upload import EnexUploader
-from enex2notion.cli_wkhtmltopdf import ensure_wkhtmltopdf
+from enex2notion.rejected_files_tracker import RejectedFilesTracker
 from enex2notion.summary_report import ImportSummary, print_report, save_report
 from enex2notion.utils_static import Rules
 
@@ -17,29 +18,38 @@ logger = logging.getLogger(__name__)
 def cli(argv):
     args = parse_args(argv)
 
-    rules = Rules.from_args(args)
-
-    setup_logging(args.verbose, args.log)
+    setup_logging(args.verbose, args.log if hasattr(args, "log") else None)
 
     # Validation sequence
     validate_python_version()
     validate_requirements()
     check_optional_tools()
     
+    # Route to appropriate command
+    if hasattr(args, "command") and args.command == "resolve-links":
+        _resolve_links_cli(args)
+    else:
+        _upload_cli(args)
+
+
+def _upload_cli(args):
+    """Execute the upload command (default)."""
+    rules = Rules.from_args(args)
+    
     # Print configuration summary
     _print_configuration_summary(args, rules)
 
-    if rules.mode_webclips == "PDF":
-        ensure_wkhtmltopdf()
-
     # Validate token and get root page
     wrapper, root_id = get_root(args.token, args.root_page)
-
-    # Determine failed export directory
-    failed_export_dir = Path(args.failed_dir) if hasattr(args, "failed_dir") and args.failed_dir else Path.cwd()
+    
+    # Initialize rejected files tracker
+    rejected_tracker = None
+    if hasattr(args, "rejected_files") and args.rejected_files:
+        rejected_tracker = RejectedFilesTracker(Path(args.rejected_files))
 
     enex_uploader = EnexUploader(
-        wrapper=wrapper, root_id=root_id, mode=args.mode, done_file=args.done_file, rules=rules, failed_export_dir=failed_export_dir
+        wrapper=wrapper, root_id=root_id, mode=args.mode, done_file=args.done_file, rules=rules, 
+        rejected_tracker=rejected_tracker
     )
 
     # Track overall import statistics
@@ -57,6 +67,10 @@ def cli(argv):
     # Save report to file if specified
     if hasattr(args, "summary") and args.summary:
         save_report(summary, Path(args.summary))
+    
+    # Save rejected files report
+    if rejected_tracker:
+        rejected_tracker.save_report()
 
 
 def _print_configuration_summary(args, rules):
@@ -82,7 +96,6 @@ def _print_configuration_summary(args, rules):
     # Upload Configuration
     logger.info(f"Upload mode: {args.mode} {'(Database)' if args.mode == 'DB' else '(Page hierarchy)'}")
     logger.info(f"Root page: '{args.root_page}'")
-    logger.info(f"Web clips mode: {rules.mode_webclips}")
     
     # Token Status
     if args.token:
@@ -96,23 +109,15 @@ def _print_configuration_summary(args, rules):
     options = []
     if rules.add_meta:
         options.append("metadata")
-    if rules.add_pdf_preview:
-        options.append("PDF preview")
     if rules.condense_lines:
         options.append("condense lines")
     if rules.condense_lines_sparse:
         options.append("condense lines (sparse)")
     if rules.tag:
         options.append(f"tag: {rules.tag}")
-    if rules.keep_failed:
-        options.append("keep failed")
-    if rules.skip_failed:
-        options.append("skip failed")
     
     if options:
         logger.info(f"Options: {', '.join(options)}")
-    
-    logger.info(f"Retry attempts: {args.retry if args.retry > 0 else 'infinite'}")
     
     # Output files
     if args.done_file:
@@ -121,10 +126,21 @@ def _print_configuration_summary(args, rules):
         logger.info(f"Summary report: {args.summary}")
     if args.log:
         logger.info(f"Log file: {args.log}")
-    if args.failed_dir:
-        logger.info(f"Failed notes directory: {args.failed_dir}")
     
     logger.info("="*80)
+
+
+def _resolve_links_cli(args):
+    """Execute the resolve-links command."""
+    logger.info("=" * 80)
+    logger.info("RESOLVE EVERNOTE LINKS COMMAND")
+    logger.info("=" * 80)
+    
+    # Validate token and get root page
+    wrapper, root_id = get_root(args.token, args.root_page)
+    
+    # Execute link resolution
+    resolve_links_command(wrapper, root_id, args)
 
 
 def _process_input(enex_uploader: EnexUploader, enex_input: list[Path], summary: ImportSummary):

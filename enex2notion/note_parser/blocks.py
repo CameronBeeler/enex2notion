@@ -19,7 +19,7 @@ from enex2notion.notion_blocks.text import NotionTextBlock, TextProp
 logger = logging.getLogger(__name__)
 
 
-def parse_note_blocks(note: Tag) -> list[NotionBaseBlock]:
+def parse_note_blocks(note: Tag, is_email: bool = False) -> list[NotionBaseBlock]:
     flatten_root(note)
 
     extract_nested_blocks(note)
@@ -36,7 +36,7 @@ def parse_note_blocks(note: Tag) -> list[NotionBaseBlock]:
 
             continue
 
-        block = _parse_block(child)
+        block = _parse_block(child, is_email)
 
         if isinstance(block, list):
             blocks.extend(block)
@@ -61,12 +61,12 @@ def _parse_indented_group(child):
     return parse_indented(child)
 
 
-def _parse_block(element: Tag):
+def _parse_block(element: Tag, is_email: bool = False):
     tag_map = {
         ("h1", "h2", "h3"): header.parse_header,
         ("hr",): lambda e: NotionDividerBlock(),
         ("ol", "ul"): el_list.parse_list,
-        ("table",): table.parse_table,
+        ("table",): lambda e: table.parse_table(e, is_email),
         ("en-media",): media.parse_media,
         ("img",): media.parse_img,
         ("div",): div.parse_div,

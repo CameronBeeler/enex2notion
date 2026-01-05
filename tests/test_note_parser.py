@@ -401,6 +401,48 @@ def test_code_block(parse_html):
     ]
 
 
+def test_inline_code(parse_html):
+    test_note = parse_html("<div>some text with <code>inline code</code> here</div>")
+
+    expected_text_prop = TextProp(
+        "some text with inline code here",
+        [
+            ["some text with "],
+            ["inline code", [["c"]]],
+            [" here"],
+        ],
+    )
+
+    assert parse_note_blocks(test_note) == [NotionTextBlock(text_prop=expected_text_prop)]
+
+
+def test_inline_code_with_code_block(parse_html):
+    """Test that both inline code and code blocks work together."""
+    test_note = parse_html(
+        "<div>for CLI mpeg-4 file compression - </div>"
+        "<div><code>ffmpeg -i input.mp4 -vcodec libx265 -crf 20 output.mp4</code></div>"
+        "<div><br/></div>"
+        "<div>Develop additional cli option for explicit trim and video file processing</div>"
+        '<div style="--en-codeblock:true;"><div># goes here</div></div>'
+    )
+
+    inline_code_prop = TextProp(
+        "ffmpeg -i input.mp4 -vcodec libx265 -crf 20 output.mp4",
+        [["ffmpeg -i input.mp4 -vcodec libx265 -crf 20 output.mp4", [["c"]]]],
+    )
+
+    assert parse_note_blocks(test_note) == [
+        NotionTextBlock(text_prop=TextProp("for CLI mpeg-4 file compression - ")),
+        NotionTextBlock(text_prop=inline_code_prop),
+        NotionTextBlock(
+            text_prop=TextProp(
+                "Develop additional cli option for explicit trim and video file processing"
+            )
+        ),
+        NotionCodeBlock(text_prop=TextProp("# goes here")),
+    ]
+
+
 def test_indented_complex(parse_html):
     test_note = parse_html(
         "<div>test1</div>"

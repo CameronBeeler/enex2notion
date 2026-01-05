@@ -20,9 +20,42 @@ def parse_args(argv):
     schema = {
         "enex_input": {
             "type": Path,
-            "nargs": "+",
+            "nargs": "*",  # Make optional for --resolve-links
             "help": "ENEX files or directories to upload",
             "metavar": "FILE/DIR",
+        },
+        "--resolve-links": {
+            "action": "store_true",
+            "help": "resolve evernote:// links in imported Notion pages",
+        },
+        "--page": {
+            "help": (
+                "(resolve-links only) analyze only a specific page by name"
+                " (useful for testing or fixing individual pages)"
+            ),
+            "metavar": "NAME",
+        },
+        "--page-list": {
+            "type": Path,
+            "help": (
+                "(resolve-links only) path to page list cache file (JSON format)."
+                " If file exists, load page map from it instead of scanning Notion."
+                " If file doesn't exist, scan Notion and save the page map to this file."
+            ),
+            "metavar": "FILE",
+        },
+        "--match-mode": {
+            "choices": ["exact", "case-insensitive", "fuzzy"],
+            "default": "case-insensitive",
+            "help": (
+                "(resolve-links only) matching strategy: exact (case-sensitive),"
+                " case-insensitive, or fuzzy (similarity-based)"
+                " (default: case-insensitive)"
+            ),
+        },
+        "--dry-run": {
+            "action": "store_true",
+            "help": "(resolve-links only) show matches without updating links",
         },
         "--token": {
             "help": (
@@ -56,46 +89,6 @@ def parse_args(argv):
                 " (default: DB)"
             ),
         },
-        "--mode-webclips": {
-            "choices": ["TXT", "PDF"],
-            "default": "TXT",
-            "help": (
-                "convert web clips to text (TXT) or pdf (PDF) before upload"
-                " (default: TXT)"
-            ),
-        },
-        "--retry": {
-            "type": int,
-            "default": 5,
-            "metavar": "N",
-            "help": (
-                "retry N times on note upload error before giving up,"
-                " 0 for infinite retries"
-                " (default: 5)"
-            ),
-        },
-        "--skip-failed": {
-            "action": "store_true",
-            "help": (
-                "skip notes that failed to upload (after exhausting --retry attempts),"
-                " by default the program will crash on upload error"
-            ),
-        },
-        "--keep-failed": {
-            "action": "store_true",
-            "help": (
-                "keep partial pages at Notion with '[UNFINISHED UPLOAD]' in title"
-                " if they fail to upload completely,"
-                " by default the program will try to delete them on upload fail"
-            ),
-        },
-        "--add-pdf-preview": {
-            "action": "store_true",
-            "help": (
-                "include preview image with PDF webclips for gallery view thumbnail"
-                " (works only with --mode-webclips=PDF)"
-            ),
-        },
         "--add-meta": {
             "action": "store_true",
             "help": (
@@ -122,15 +115,15 @@ def parse_args(argv):
             "metavar": "FILE",
             "help": "file for uploaded notes hashes to resume interrupted upload",
         },
-        "--failed-dir": {
-            "type": Path,
-            "metavar": "DIR",
-            "help": "directory for failed note exports (default: current directory)",
-        },
         "--summary": {
             "type": Path,
             "metavar": "FILE",
             "help": "save import summary report to file (always printed to console)",
+        },
+        "--rejected-files": {
+            "type": Path,
+            "metavar": "FILE",
+            "help": "save rejected/unsupported files report to CSV file",
         },
         "--log": {
             "type": Path,
@@ -164,5 +157,20 @@ def parse_args(argv):
     elif not args.token and "NOTION_TOKEN" in os.environ:
         # Auto-detect if not explicitly specified
         args.token = os.environ["NOTION_TOKEN"]
-
+    
+    # Validate arguments based on mode
+    if args.resolve_links:
+        # Resolve-links mode: token is required, enex_input is not
+        if not args.token:
+            parser.error(
+                "--token or --use-env is required for --resolve-links.\n"
+                "Create an Integration token at https://www.notion.com/my-integrations"
+            )
+        args.command = "resolve-links"
+    else:
+        # Upload mode: enex_input is required
+        if not args.enex_input:
+            parser.error("the following arguments are required: FILE/DIR")
+        args.command = "upload"
+    
     return args

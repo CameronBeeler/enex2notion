@@ -72,14 +72,6 @@ def validate_requirements():
                 import tinycss2
                 version = tinycss2.__version__
                 installed_packages.append((pkg_name, version))
-            elif pkg_name == 'pdfkit':
-                import pdfkit
-                version = getattr(pdfkit, '__version__', 'unknown')
-                installed_packages.append((pkg_name, version))
-            elif pkg_name == 'PyMuPDF':
-                import fitz
-                version = fitz.__version__ if hasattr(fitz, '__version__') else fitz.VersionBind
-                installed_packages.append((pkg_name, version))
             elif pkg_name == 'tqdm':
                 import tqdm
                 version = tqdm.__version__
@@ -122,19 +114,9 @@ def validate_requirements():
 
 
 def check_optional_tools():
-    """Check for optional external tools (wkhtmltopdf)."""
-    import shutil
-    
-    logger.info("")
-    logger.info("Optional tools:")
-    
-    # Check for wkhtmltopdf (needed for PDF web clips)
-    wkhtmltopdf_path = shutil.which('wkhtmltopdf')
-    if wkhtmltopdf_path:
-        logger.info(f"  • wkhtmltopdf: ✓ Found at {wkhtmltopdf_path}")
-    else:
-        logger.warning("  • wkhtmltopdf: ⚠ Not found (required for --mode-webclips=PDF)")
-        logger.warning("    Install from: https://wkhtmltopdf.org/")
+    """Check for optional external tools."""
+    # Currently no optional tools are required
+    pass
 
 
 def validate_python_version():

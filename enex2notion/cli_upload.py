@@ -1,4 +1,3 @@
-import itertools
 import logging
 from pathlib import Path
 
@@ -6,7 +5,7 @@ from enex2notion.enex_parser import parse_all_notes
 from enex2notion.enex_types import EvernoteNote
 from enex2notion.enex_uploader import upload_note
 from enex2notion.enex_uploader_modes import get_notebook_database, get_notebook_page
-from enex2notion.failed_note_exporter import export_all_failed_notes
+from enex2notion.exception_tracker import ExceptionTracker
 from enex2notion.note_parser.note import parse_note
 from enex2notion.summary_report import NotebookStats
 from enex2notion.utils_exceptions import NoteUploadFailException
@@ -72,7 +71,7 @@ class DoneFile(object):
 
 class EnexUploader(object):
     def __init__(
-        self, wrapper, root_id, mode: str, done_file: Path | None, rules: Rules, failed_export_dir: Path | None = None
+        self, wrapper, root_id, mode: str, done_file: Path | None, rules: Rules, rejected_tracker=None
     ):
         self.wrapper = wrapper  # NotionAPIWrapper instance
         self.root_id = root_id  # Root page ID string
@@ -81,7 +80,10 @@ class EnexUploader(object):
         self.rules = rules
 
         self.done_hashes = DoneFile(done_file) if done_file else set()
-        self.failed_export_dir = failed_export_dir or Path.cwd()
+        self.rejected_tracker = rejected_tracker
+        
+        # Initialize exception tracker for partial imports
+        self.exception_tracker = ExceptionTracker(wrapper, root_id) if wrapper else None
 
         self.notebook_root = None
         self.notebook_schema = None  # Store database schema if in DB mode
@@ -105,11 +107,10 @@ class EnexUploader(object):
 
         logger.info(f"Parsed {parse_stats.total} notes: {parse_stats.successful} successful, {parse_stats.failed} failed")
 
-        # Phase 2: Export failed notes immediately
+        # Phase 2: Track parse failures
+        # Note: Parse failures are now tracked in-band via partial imports
+        # No separate export directory needed - all notes get Notion pages
         if parse_stats.failed > 0:
-            failed_results = [r for r in parse_stats.results if r.failed]
-            unimported_dir = export_all_failed_notes(failed_results, notebook_name, self.failed_export_dir, "failed")
-            notebook_stats.failed_directory = unimported_dir
             notebook_stats.failed = parse_stats.failed
 
         # Phase 3: Get or create notebook root
@@ -124,16 +125,15 @@ class EnexUploader(object):
             else:
                 self.notebook_root = result
                 self.notebook_schema = None
-        except NoteUploadFailException:
-            if not self.rules.skip_failed:
-                raise
-            # All notes failed to upload due to notebook root creation failure
+        except NoteUploadFailException as e:
+            # Notebook root creation failed - cannot continue with this notebook
+            logger.error(f"Failed to create notebook root: {e}")
+            # All notes in this notebook are considered failed
             notebook_stats.failed += parse_stats.successful
             return notebook_stats
 
         # Phase 4: Upload successfully parsed notes
         successful_results = [r for r in parse_stats.results if not r.failed and r.note]
-        skipped_results = []  # Track skipped notes for export (excludes already-uploaded)
 
         for idx, result in enumerate(successful_results, 1):
             note = result.note
@@ -143,30 +143,8 @@ class EnexUploader(object):
                 notebook_stats.successful += 1
             elif upload_result == "skipped":
                 notebook_stats.skipped += 1
-                # Only export notes that were skipped due to errors, not already-uploaded notes
-                if skip_reason and "Already uploaded" not in skip_reason:
-                    result.skip_reason = skip_reason
-                    skipped_results.append(result)
             elif upload_result == "failed":
                 notebook_stats.failed += 1
-
-        # Phase 5: Export skipped notes to unimported directory
-        if skipped_results:
-            if not notebook_stats.failed_directory:
-                # Create unimported directory if not already created
-                notebook_stats.failed_directory = export_all_failed_notes(
-                    skipped_results, notebook_name, self.failed_export_dir, "skipped"
-                )
-            else:
-                # Use existing directory
-                for result in skipped_results:
-                    try:
-                        from enex2notion.failed_note_exporter import export_failed_note
-
-                        export_failed_note(result, notebook_stats.failed_directory, notebook_name, "skipped")
-                    except Exception as e:
-                        logger.error(f"Failed to export skipped note: {e}")
-
 
         return notebook_stats
 
@@ -191,42 +169,49 @@ class EnexUploader(object):
 
         # Parse note content
         logger.debug(f"Converting note '{note.title}' to Notion blocks")
-        note_blocks = self._parse_note(note)
-        if not note_blocks:
-            skip_reason = "No blocks after parsing (empty or unsupported content)"
-            logger.warning(f"Skipping note '{note.title}': {skip_reason}")
-            return "skipped", skip_reason
+        note_blocks, errors = self._parse_note(note)
+        
+        # Handle blank note names
+        if not note.title or not note.title.strip():
+            note.title = "[Untitled Note]"
+            if "Note had no title in Evernote" not in str(errors):
+                errors.append("Note had no title in Evernote - assigned default title")
+        
+        # Always upload even if no blocks (partial import)
+        # The error summary will be added by upload_note
 
         # Upload to Notion
         logger.info(f"Uploading note {note_idx}/{total_notes}: '{note.title}'")
 
         try:
-            self._upload_note(self.notebook_root, note, note_blocks)
+            page_id, has_errors = self._upload_note(self.notebook_root, note, note_blocks, errors, notebook_name)
             self.done_hashes.add(note.note_hash)
+            
+            # Track partial import in exception summary page
+            if has_errors and self.exception_tracker:
+                self.exception_tracker.track_partial_import(
+                    notebook_name=notebook_name,
+                    note_title=note.title,
+                    page_id=page_id,
+                    errors=errors
+                )
+            
             return "success", None
         except NoteUploadFailException as e:
-            logger.error(f"Failed to upload note '{note.title}': {e}")
-            if not self.rules.skip_failed:
-                raise
-
-            # Export failed upload to ENEX
-            try:
-                from enex2notion.failed_note_exporter import export_failed_note, create_failed_directory
-
-                unimported_dir = create_failed_directory(notebook_name, self.failed_export_dir)
-                export_failed_note(parse_result, unimported_dir, notebook_name, "failed")
-            except Exception as export_err:
-                logger.error(f"Failed to export failed note: {export_err}")
-
+            error_msg = str(e)
+            logger.error(f"Failed to upload note '{note.title}': {error_msg}")
+            # Continue with next note - error tracking handled via exception pages
             return "failed", None
 
     def _parse_note(self, note):
+        """Parse note and return (blocks, errors) tuple."""
         try:
             return parse_note(note, self.rules)
         except Exception as e:
             logger.error(f"Failed to parse note '{note.title}'")
             logger.debug(e, exc_info=e)
-            return []
+            # Return empty blocks with error message
+            return [], [f"Parse exception: {str(e)}"]
 
     def _get_notebook_root(self, notebook_title):
         if self.wrapper is None:
@@ -255,28 +240,23 @@ class EnexUploader(object):
             get_func, error_message, self.wrapper, self.root_id, notebook_title
         )
 
-    def _upload_note(self, notebook_root, note, note_blocks):
-        self._attempt_upload(
-            upload_note,
-            f"Failed to upload note '{note.title}' to Notion",
+    def _upload_note(self, notebook_root, note, note_blocks, errors, notebook_name):
+        return upload_note(
             self.wrapper,
             notebook_root,
             note,
             note_blocks,
-            self.rules.keep_failed,
+            errors,
             is_database=(self.mode == "DB"),
             database_schema=self.notebook_schema,
+            rejected_tracker=self.rejected_tracker,
+            notebook_name=notebook_name,
         )
 
     def _attempt_upload(self, upload_func, error_message, *args, **kwargs):
-        for attempt in itertools.count(1):
-            try:
-                return upload_func(*args, **kwargs)
-            except NoteUploadFailException as e:
-                logger.debug(f"Upload error: {e}", exc_info=e)
-
-                if attempt == self.rules.retry:
-                    logger.error(f"{error_message}!")
-                    raise
-
-                logger.warning(f"{error_message}! Retrying...")
+        """Attempt upload with error wrapping."""
+        try:
+            return upload_func(*args, **kwargs)
+        except Exception as e:
+            logger.error(f"{error_message}: {e}")
+            raise NoteUploadFailException from e

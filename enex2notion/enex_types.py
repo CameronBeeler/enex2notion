@@ -23,6 +23,7 @@ class EvernoteNote(object):
     author: str
     url: str
     is_webclip: bool
+    is_email: bool
     resources: list[EvernoteResource]
     _note_hash: str = None
 
