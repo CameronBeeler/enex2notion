@@ -756,6 +756,12 @@ def _convert_table(notion_block) -> dict[str, Any] | list[dict[str, Any]]:
     if len(all_table_rows) <= max_rows_per_table:
         # Single table - no split needed
         children = [header_row] + all_table_rows if header_row else all_table_rows
+        
+        # Validate that we have at least one row
+        if not children:
+            logger.warning("Table has no rows - skipping")
+            return None
+        
         return {
             "type": "table",
             "table": {

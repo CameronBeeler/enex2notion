@@ -21,12 +21,20 @@ class ListNodes(object):
         self.is_ul = is_ul
 
     def add_li(self, subelement: Tag) -> None:
+        # Extract nested lists BEFORE parsing text (so text doesn't include nested content)
+        nested_lists = _extract_nested_lists(subelement)
+        
+        # Extract embedded media
         embedded_media = _extract_media(subelement)
 
+        # Parse the list item (now without nested lists in the text)
         li_item = _parse_list_item(subelement, self.is_ul)
 
+        # Add children: media first, then nested lists
         if embedded_media:
-            li_item.children = embedded_media
+            li_item.children.extend(embedded_media)
+        if nested_lists:
+            li_item.children.extend(nested_lists)
 
         self.nodes.append(li_item)
 
@@ -63,6 +71,22 @@ def parse_list(element: Tag) -> list[NotionBaseBlock]:
             list_nodes.add_odd_one(subelement)
 
     return list_nodes.nodes
+
+
+def _extract_nested_lists(element: Tag):
+    """Extract and parse nested ul/ol lists from a list item.
+    
+    This removes nested lists from the element and returns them as parsed blocks.
+    Must be called BEFORE extracting text to avoid duplicate content.
+    """
+    nested_blocks = []
+    # Find direct child lists (not deeply nested)
+    for nested_list in element.find_all(["ul", "ol"], recursive=False):
+        # Parse the nested list
+        nested_blocks.extend(parse_list(nested_list))
+        # Remove it from the element so it doesn't appear in text extraction
+        nested_list.extract()
+    return nested_blocks
 
 
 def _extract_media(element: Tag):
