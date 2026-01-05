@@ -184,16 +184,16 @@ class EnexUploader(object):
         logger.info(f"Uploading note {note_idx}/{total_notes}: '{note.title}'")
 
         try:
-            page_id, has_errors = self._upload_note(self.notebook_root, note, note_blocks, errors, notebook_name)
+            page_id, has_errors, updated_errors = self._upload_note(self.notebook_root, note, note_blocks, errors, notebook_name)
             self.done_hashes.add(note.note_hash)
             
-            # Track partial import in exception summary page
+            # Track partial import in exception summary page (use updated errors with warnings)
             if has_errors and self.exception_tracker:
                 self.exception_tracker.track_partial_import(
                     notebook_name=notebook_name,
                     note_title=note.title,
                     page_id=page_id,
-                    errors=errors
+                    errors=updated_errors
                 )
             
             return "success", None

@@ -36,6 +36,103 @@ def _is_valid_url(url: str) -> bool:
     return bool(url_pattern.match(url))
 
 
+def _get_resource_filename(notion_block) -> str:
+    """Extract filename from a resource block.
+    
+    Args:
+        notion_block: NotionUploadableBlock with a resource attribute
+        
+    Returns:
+        Filename string, or "unknown file" if not found
+    """
+    if hasattr(notion_block, "resource") and notion_block.resource:
+        resource = notion_block.resource
+        if hasattr(resource, "file_name") and resource.file_name:
+            return resource.file_name
+        # Fall back to hash if available
+        if hasattr(resource, "md5") and resource.md5:
+            return f"{resource.md5} (unnamed)"
+    return "unknown file"
+
+
+def _create_failed_upload_placeholder(filename: str, file_type: str) -> dict[str, Any]:
+    """Create a visible placeholder for a failed file upload.
+    
+    Args:
+        filename: Name of the file that failed to upload
+        file_type: Type of file ("image", "PDF", "file")
+        
+    Returns:
+        Callout block dict in API format
+    """
+    return {
+        "type": "callout",
+        "callout": {
+            "rich_text": [
+                {
+                    "type": "text",
+                    "text": {
+                        "content": f"⚠️ {file_type.capitalize()} attachment failed to import: \"{filename}\""
+                    },
+                    "annotations": {
+                        "bold": False,
+                        "italic": True,
+                        "strikethrough": False,
+                        "underline": False,
+                        "code": False,
+                        "color": "default"
+                    }
+                }
+            ],
+            "icon": {"type": "emoji", "emoji": "⚠️"},
+            "color": "yellow_background"
+        }
+    }
+
+
+def _create_inline_warning_marker(message: str) -> dict[str, Any]:
+    """Create a compact inline warning paragraph for format transformations.
+    
+    Args:
+        message: Warning message to display
+        
+    Returns:
+        Paragraph block dict in API format
+    """
+    return {
+        "type": "paragraph",
+        "paragraph": {
+            "rich_text": [
+                {
+                    "type": "text",
+                    "text": {"content": "⚠️ "},
+                    "annotations": {
+                        "bold": False,
+                        "italic": False,
+                        "strikethrough": False,
+                        "underline": False,
+                        "code": False,
+                        "color": "orange"
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": {"content": message},
+                    "annotations": {
+                        "bold": False,
+                        "italic": True,
+                        "strikethrough": False,
+                        "underline": False,
+                        "code": False,
+                        "color": "gray"
+                    }
+                }
+            ],
+            "color": "default"
+        }
+    }
+
+
 def convert_block_to_api_format(notion_block) -> dict[str, Any] | list[dict[str, Any]] | None:
     """Convert internal block to official API format.
 
@@ -100,7 +197,13 @@ def _convert_text_block(notion_block) -> dict[str, Any] | list[dict[str, Any]]:
         }
     }]
     
-    # Add overflow as additional paragraphs
+    # Add overflow as additional paragraphs with warning marker
+    if overflow:
+        # Insert warning marker before continuation blocks
+        blocks.append(_create_inline_warning_marker(
+            f"Paragraph split into {len(overflow) + 1} blocks (API limit: 100 formatting segments per block)"
+        ))
+    
     for overflow_chunk in overflow:
         blocks.append({
             "type": "paragraph",
@@ -167,10 +270,11 @@ def _convert_bookmark(notion_block) -> dict[str, Any]:
     # Validate URL - Notion requires proper HTTP/HTTPS URLs
     if not url:
         logger.warning("Bookmark block has empty URL - converting to paragraph")
+        add_warning("Empty bookmark removed")
         return {
             "type": "paragraph",
             "paragraph": {
-                "rich_text": [{"type": "text", "text": {"content": "[Empty bookmark]"}}],
+                "rich_text": [{"type": "text", "text": {"content": "⚠️ [Empty bookmark]"}}],
                 "color": "default"
             }
         }
@@ -183,10 +287,11 @@ def _convert_bookmark(notion_block) -> dict[str, Any]:
     # Basic validation - check if URL has valid structure
     if not _is_valid_url(url):
         logger.warning(f"Invalid bookmark URL: {url} - converting to paragraph")
+        add_warning(f"Invalid bookmark URL: {url[:80]}")
         return {
             "type": "paragraph",
             "paragraph": {
-                "rich_text": [{"type": "text", "text": {"content": f"[Invalid link: {url}]"}}],
+                "rich_text": [{"type": "text", "text": {"content": f"⚠️ [Invalid link: {url}]"}}],
                 "color": "default"
             }
         }
@@ -245,12 +350,18 @@ def _convert_image(notion_block) -> dict[str, Any]:
     """Convert image block.
     
     Uses file_upload type with the uploaded file ID.
+    If upload failed, creates a visible placeholder.
     """
     # Get file_upload ID from block attributes
     # The ID should be set by uploading the image before conversion
     file_upload_id = notion_block.attrs.get("file_upload_id")
+    upload_failed = notion_block.attrs.get("upload_failed", False)
     
     if not file_upload_id:
+        if upload_failed:
+            # Create a visible placeholder paragraph
+            filename = _get_resource_filename(notion_block)
+            return _create_failed_upload_placeholder(filename, "image")
         logger.warning("Image block has no file_upload_id - skipping")
         return None
     
@@ -423,10 +534,12 @@ def _create_rich_text_object(text: str, formatting: list) -> dict[str, Any]:
             if link_url.lower().startswith("evernote://"):
                 # Try markdown format [text](url) in case Notion parses it differently
                 # If this doesn't work, it will just appear as plain markdown text
-                rich_text_obj["text"]["content"] = f"[{text}]({link_url})"
+                rich_text_obj["text"]["content"] = f"⚠️ [{text}]({link_url})"
+                add_warning(f"Evernote internal link converted to text: {link_url[:80]}")
                 logger.debug(f"Converted evernote:// link to markdown: {link_url}")
             else:
-                # For other invalid URLs, keep text only
+                # For other invalid URLs, keep text with warning marker
+                rich_text_obj["text"]["content"] = f"⚠️ {text}"
                 add_warning(f"Unsupported URL scheme removed: {link_url[:80]}")
                 logger.warning(f"Removed unsupported URL (keeping text): {link_url[:100]}")
     
@@ -493,11 +606,17 @@ def _convert_pdf(notion_block) -> dict[str, Any]:
     """Convert PDF block.
     
     Uses file_upload type with the uploaded file ID.
+    If upload failed, creates a visible placeholder.
     """
     # Get file_upload ID from block attributes
     file_upload_id = notion_block.attrs.get("file_upload_id")
+    upload_failed = notion_block.attrs.get("upload_failed", False)
     
     if not file_upload_id:
+        if upload_failed:
+            # Create a visible placeholder paragraph
+            filename = _get_resource_filename(notion_block)
+            return _create_failed_upload_placeholder(filename, "PDF")
         logger.warning("PDF block has no file_upload_id - skipping")
         return None
     
@@ -516,11 +635,17 @@ def _convert_file(notion_block) -> dict[str, Any]:
     """Convert generic file block.
     
     Uses file_upload type with the uploaded file ID.
+    If upload failed, creates a visible placeholder.
     """
     # Get file_upload ID from block attributes
     file_upload_id = notion_block.attrs.get("file_upload_id")
+    upload_failed = notion_block.attrs.get("upload_failed", False)
     
     if not file_upload_id:
+        if upload_failed:
+            # Create a visible placeholder paragraph
+            filename = _get_resource_filename(notion_block)
+            return _create_failed_upload_placeholder(filename, "file")
         logger.warning("File block has no file_upload_id - skipping")
         return None
     
@@ -595,12 +720,28 @@ def _convert_table(notion_block) -> dict[str, Any] | list[dict[str, Any]]:
             
             # Add continuation rows if needed
             if needs_continuation:
-                for cont_cells in continuation_rows_data:
+                for cont_idx, cont_cells in enumerate(continuation_rows_data):
                     # Fill empty cells with empty rich_text
                     cont_cells = [
                         cell if cell else [{"type": "text", "text": {"content": ""}}]
                         for cell in cont_cells
                     ]
+                    # Add warning marker to first cell of continuation row
+                    if cont_cells and cont_idx == 0:  # Only mark first continuation row
+                        warning_marker = {
+                            "type": "text",
+                            "text": {"content": "⚠️ "},
+                            "annotations": {
+                                "bold": False,
+                                "italic": False,
+                                "strikethrough": False,
+                                "underline": False,
+                                "code": False,
+                                "color": "orange"
+                            }
+                        }
+                        cont_cells[0] = [warning_marker] + cont_cells[0]
+                    
                     all_table_rows.append({
                         "type": "table_row",
                         "table_row": {
@@ -637,7 +778,7 @@ def _convert_table(notion_block) -> dict[str, Any] | list[dict[str, Any]]:
     )
     
     tables = []
-    for i in range(0, len(all_table_rows), max_rows_per_table):
+    for table_idx, i in enumerate(range(0, len(all_table_rows), max_rows_per_table)):
         chunk = all_table_rows[i:i + max_rows_per_table]
         # Include header in each split table
         children = [header_row] + chunk if header_row else chunk
@@ -651,6 +792,12 @@ def _convert_table(notion_block) -> dict[str, Any] | list[dict[str, Any]]:
                 "children": children
             }
         })
+        
+        # Add warning marker between split tables (except after the last one)
+        if table_idx < num_split_tables - 1:
+            tables.append(_create_inline_warning_marker(
+                f"Table continuation {table_idx + 2} of {num_split_tables} (API limit: {max_rows_per_table} rows per table)"
+            ))
     
     return tables
 

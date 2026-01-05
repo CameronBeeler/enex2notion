@@ -1,4 +1,5 @@
 import logging
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from tqdm import tqdm
@@ -32,7 +33,10 @@ def upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_da
         notebook_name: Name of notebook for tracking rejected files
     
     Returns:
-        Tuple of (page_id, had_errors) where had_errors is True for partial imports
+        Tuple of (page_id, had_errors, errors) where:
+        - page_id: Notion page ID
+        - had_errors: True if partial import
+        - errors: Updated list of all errors/warnings
     """
     try:
         return _upload_note(wrapper, root_id, note, note_blocks, errors, is_database, database_schema, rejected_tracker, notebook_name)
@@ -90,12 +94,22 @@ def _upload_single_file(block, notion_api, rejected_tracker, notebook_name, note
         note_title: Title of note for tracking
         
     Returns:
-        Tuple of (block, upload_id) where upload_id is None if failed
+        Tuple of (block, upload_id, warnings) where upload_id is None if failed,
+        and warnings is a list of warning messages from this upload
     """
+    # Initialize warnings for this thread
+    from enex2notion.parse_warnings import init_warnings, get_warnings, clear_warnings
+    clear_warnings()
+    init_warnings()
+    
     upload_id = upload_image_to_notion(
         block.resource, notion_api, rejected_tracker, notebook_name, note_title
     )
-    return (block, upload_id)
+    
+    # Collect warnings from this thread
+    warnings = get_warnings()
+    
+    return (block, upload_id, warnings)
 
 
 def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_name="", note_title=""):
@@ -104,6 +118,9 @@ def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_na
     Handles images, PDFs, and generic files with concurrent uploads (max 3 workers
     to respect Notion's ~3 req/s rate limit).
     
+    Returns:
+        List of warnings collected from all file uploads
+    
     Args:
         blocks: List of blocks to process
         notion_api: NotionAPIWrapper instance for uploading
@@ -111,15 +128,19 @@ def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_na
         notebook_name: Name of notebook for tracking rejected files
         note_title: Title of note for tracking rejected files
     """
+    from enex2notion.parse_warnings import add_warning
+    
     # Collect all uploadable blocks
     uploadable_blocks = []
     _collect_uploadable_blocks(blocks, uploadable_blocks)
     
     if not uploadable_blocks:
-        return
+        return []
     
     # Upload files concurrently with thread pool (max 3 workers for rate limiting)
     logger.debug(f"Uploading {len(uploadable_blocks)} files concurrently...")
+    
+    all_warnings = []
     
     with ThreadPoolExecutor(max_workers=3) as executor:
         # Submit all upload tasks
@@ -133,16 +154,28 @@ def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_na
         # Collect results as they complete
         for future in as_completed(future_to_block):
             try:
-                block, upload_id = future.result()
+                block, upload_id, warnings = future.result()
+                
+                # Collect warnings from worker thread
+                if warnings:
+                    all_warnings.extend(warnings)
+                    # Also add to main thread's warning context
+                    for warning in warnings:
+                        add_warning(warning)
+                
                 if upload_id:
                     block.attrs["file_upload_id"] = upload_id
                     block_type = block.__class__.__name__
                     logger.debug(f"Uploaded {block_type}, file_upload ID: {upload_id}")
                 else:
+                    # Mark block as failed so we can add a placeholder
+                    block.attrs["upload_failed"] = True
                     block_type = block.__class__.__name__
                     logger.warning(f"Failed to upload {block_type}")
             except Exception as e:
                 logger.error(f"File upload failed with exception: {e}")
+    
+    return all_warnings
 
 
 def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_database, database_schema, rejected_tracker, notebook_name):
@@ -189,7 +222,13 @@ def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_d
     page_id = new_page["id"]
 
     # Process uploadable blocks (images, PDFs, files): upload to Notion and set file_upload IDs
-    _process_image_blocks(note_blocks, wrapper, rejected_tracker, notebook_name, note.title)
+    file_upload_warnings = _process_image_blocks(note_blocks, wrapper, rejected_tracker, notebook_name, note.title)
+    
+    # Merge file upload warnings with errors
+    if file_upload_warnings:
+        errors = list(errors) if errors else []
+        errors.extend(file_upload_warnings)
+        has_errors = True
 
     # Convert blocks to API format
     api_blocks = []
@@ -211,27 +250,27 @@ def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_d
         # Update has_errors flag
         has_errors = bool(errors)
         
-        # Update page properties to set partial import flag if this is a database page
-        if has_errors and is_database:
-            logger.debug("  Updating page to mark as partial import due to conversion warnings")
+    # Update page properties and error summary if we have any errors
+    if has_errors:
+        # Update database properties to set partial import flag
+        if is_database:
+            logger.debug("  Updating page to mark as partial import")
             try:
                 properties = note_to_database_properties(note, database_schema, partial_import=True)
                 wrapper.client.pages.update(page_id=page_id, properties=properties)
             except Exception as e:
                 logger.warning(f"Failed to update partial import flag: {e}")
         
-        # Need to regenerate error summary block with new warnings
-        if has_errors:
-            # Remove old error block if it exists
-            if api_blocks and api_blocks[0].get("type") == "callout":
-                api_blocks.pop(0)
-            
-            # Create updated error block
-            error_block = create_error_summary_block(errors)
-            if error_block:
-                error_block_api = convert_block_to_api_format(error_block)
-                if error_block_api:
-                    api_blocks.insert(0, error_block_api)
+        # Remove old error block if it exists
+        if api_blocks and api_blocks[0].get("type") == "callout":
+            api_blocks.pop(0)
+        
+        # Create updated error block with all errors
+        error_block = create_error_summary_block(errors)
+        if error_block:
+            error_block_api = convert_block_to_api_format(error_block)
+            if error_block_api:
+                api_blocks.insert(0, error_block_api)
 
     # Upload blocks in batches
     progress_iter = tqdm(
@@ -242,16 +281,59 @@ def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_d
         ncols=PROGRESS_BAR_WIDTH,
     )
 
+    block_upload_error = None
+    max_retries = 3
+    
     try:
         for start_idx in progress_iter:
             batch = api_blocks[start_idx : start_idx + 100]
-            wrapper.append_blocks(block_id=page_id, children=batch)
-
+            
+            # Retry logic for this batch
+            for attempt in range(max_retries):
+                try:
+                    wrapper.append_blocks(block_id=page_id, children=batch)
+                    break  # Success - move to next batch
+                except Exception as batch_error:
+                    is_last_attempt = (attempt == max_retries - 1)
+                    
+                    # Check if it's a transient error worth retrying
+                    error_msg = str(batch_error).lower()
+                    is_transient = any(x in error_msg for x in [
+                        "timeout", "connection", "rate limit", "429", "503", "502", "500"
+                    ])
+                    
+                    if is_transient and not is_last_attempt:
+                        wait_time = (2 ** attempt) * 0.5  # 0.5s, 1s, 2s
+                        logger.warning(
+                            f"Transient error uploading block batch (attempt {attempt + 1}/{max_retries}): {batch_error}"
+                        )
+                        time.sleep(wait_time)
+                        continue
+                    
+                    # Last attempt or permanent error - raise it
+                    raise batch_error
     except Exception as e:
-        # Always keep the page (now a partial import) - don't archive/delete
-        # Users can review via Exception pages or Partial Import filter
-        raise
+        # Block upload failed - keep page as partial import
+        block_upload_error = str(e)
+        logger.warning(f"Block upload failed after retries: {block_upload_error}")
+        
+        # Add error to list
+        errors = list(errors) if errors else []
+        errors.append(f"Failed to upload blocks: {block_upload_error}")
+        has_errors = True
+        
+        # Update page to mark as partial import
+        if is_database:
+            try:
+                properties = note_to_database_properties(note, database_schema, partial_import=True)
+                wrapper.client.pages.update(page_id=page_id, properties=properties)
+                logger.debug("  Marked page as partial import due to block upload failure")
+            except Exception as update_err:
+                logger.warning(f"Failed to update partial import flag: {update_err}")
 
-    logger.debug(f"Successfully uploaded note '{note.title}' with {len(api_blocks)} blocks")
+    if block_upload_error:
+        logger.warning(f"Note '{note.title}' uploaded with errors (page created but some blocks failed)")
+    else:
+        logger.debug(f"Successfully uploaded note '{note.title}' with {len(api_blocks)} blocks")
     
-    return (page_id, has_errors)
+    return (page_id, has_errors, errors)
