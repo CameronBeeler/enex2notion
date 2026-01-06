@@ -57,6 +57,16 @@ def parse_args(argv):
             "action": "store_true",
             "help": "(resolve-links only) show matches without updating links",
         },
+        "--queue": {
+            "type": Path,
+            "metavar": "FILE",
+            "help": "(resolve-links only) path to queue file (TSV: page_id\tpage_title). If missing, it will be created from the collected pages.",
+        },
+        "--limit": {
+            "type": int,
+            "metavar": "N",
+            "help": "(resolve-links only) process at most N pages from the queue in this run",
+        },
         "--token": {
             "help": (
                 "Notion Integration token (create at https://www.notion.com/my-integrations)."
@@ -167,6 +177,8 @@ def parse_args(argv):
                 "Create an Integration token at https://www.notion.com/my-integrations"
             )
         args.command = "resolve-links"
+        # Set enex_input to None in resolve-links mode (not used)
+        args.enex_input = None
     else:
         # Upload mode: enex_input is required
         if not args.enex_input:

@@ -339,6 +339,165 @@ class NotionAPIWrapper:
             logger.warning(f"Failed to traverse page {root_id}: {e}")
 
         return title_map
+    
+    def list_all_pages_batched(
+        self, root_id: str, batch_size: int = 500, batch_callback=None
+    ) -> dict[str, str]:
+        """Recursively collect all pages with batched callbacks.
+        
+        Args:
+            root_id: Root page ID to start traversal
+            batch_size: Number of pages per batch before calling callback
+            batch_callback: Optional callback function(batch_map) called every batch_size pages
+        
+        Returns:
+            Complete dictionary mapping page title to page ID
+        """
+        all_pages: dict[str, str] = {}  # id -> title
+        batch: dict[str, str] = {}      # id -> title
+        
+        def _collect_with_batching(page_id: str):
+            nonlocal batch
+            
+            try:
+                # Get the page itself
+                time.sleep(self._rate_limit_delay)
+                page = self.client.pages.retrieve(page_id=page_id)
+                page_title = _extract_page_title(page) or ""
+                all_pages[page_id] = page_title
+                batch[page_id] = page_title
+                
+                # Check if batch is full
+                if len(batch) >= batch_size and batch_callback:
+                    batch_callback(batch.copy())
+                    batch.clear()
+                
+                # Get child blocks/pages
+                blocks = self.get_blocks(page_id)
+                
+                for block in blocks:
+                    block_type = block.get("type")
+                    
+                    if block_type == "child_page":
+                        child_id = block["id"]
+                        _collect_with_batching(child_id)
+                    
+                    elif block_type == "child_database":
+                        db_id = block["id"]
+                        db_title = block.get("child_database", {}).get("title", "")
+                        all_pages[db_id] = db_title
+                        batch[db_id] = db_title
+                        
+                        if len(batch) >= batch_size and batch_callback:
+                            batch_callback(batch.copy())
+                            batch.clear()
+                        
+                        self._list_database_pages_batched(db_id, all_pages, batch, batch_size, batch_callback)
+            
+            except APIResponseError as e:
+                logger.warning(f"Failed to traverse page {page_id}: {e}")
+        
+        # Start collection
+        _collect_with_batching(root_id)
+        
+        # Send final batch if any remaining
+        if batch and batch_callback:
+            batch_callback(batch.copy())
+        
+        return all_pages
+    
+    def _list_database_pages_batched(
+        self, database_id: str, all_pages: dict, batch: dict, batch_size: int, batch_callback
+    ):
+        """List database pages with batching support."""
+        start_cursor = None
+        
+        while True:
+            time.sleep(self._rate_limit_delay)
+            
+            headers = {
+                "Authorization": f"Bearer {self._auth_token}",
+                "Content-Type": "application/json",
+                "Notion-Version": NOTION_API_VERSION,
+            }
+            
+            payload = {"page_size": 100}
+            if start_cursor:
+                payload["start_cursor"] = start_cursor
+            
+            try:
+                response = requests.post(
+                    f"https://api.notion.com/v1/databases/{database_id}/query",
+                    headers=headers,
+                    json=payload,
+                    timeout=30,
+                )
+                
+                if response.status_code != 200:
+                    error_data = response.json() if response.text else {}
+                    logger.warning(f"Failed to query database {database_id}: {error_data.get('message', response.text)}")
+                    break
+                
+                data = response.json()
+                pages = data.get("results", [])
+                
+                for page in pages:
+                    page_id = page["id"]
+                    page_title = _extract_page_title(page) or ""
+                    all_pages[page_id] = page_title
+                    batch[page_id] = page_title
+                    
+                    if len(batch) >= batch_size and batch_callback:
+                        batch_callback(batch.copy())
+                        batch.clear()
+                    
+                    # Recurse into database page (using batched version)
+                    self._collect_pages_recursive_batched(page_id, all_pages, batch, batch_size, batch_callback)
+                
+                if not data.get("has_more"):
+                    break
+                
+                start_cursor = data.get("next_cursor")
+            except Exception as e:
+                logger.warning(f"Failed to query database {database_id}: {e}")
+                break
+    
+    def _collect_pages_recursive_batched(
+        self, page_id: str, all_pages: dict, batch: dict, batch_size: int, batch_callback
+    ):
+        """Helper for recursive batched collection."""
+        try:
+            blocks = self.get_blocks(page_id)
+            
+            for block in blocks:
+                block_type = block.get("type")
+                
+                if block_type == "child_page":
+                    child_id = block["id"]
+                    child_title = block.get("child_page", {}).get("title", "")
+                    all_pages[child_id] = child_title
+                    batch[child_id] = child_title
+                    
+                    if len(batch) >= batch_size and batch_callback:
+                        batch_callback(batch.copy())
+                        batch.clear()
+                    
+                    self._collect_pages_recursive_batched(child_id, all_pages, batch, batch_size, batch_callback)
+                
+                elif block_type == "child_database":
+                    db_id = block["id"]
+                    db_title = block.get("child_database", {}).get("title", "")
+                    all_pages[db_id] = db_title
+                    batch[db_id] = db_title
+                    
+                    if len(batch) >= batch_size and batch_callback:
+                        batch_callback(batch.copy())
+                        batch.clear()
+                    
+                    self._list_database_pages_batched(db_id, all_pages, batch, batch_size, batch_callback)
+        
+        except APIResponseError as e:
+            logger.warning(f"Failed to traverse page {page_id}: {e}")
 
     def _list_database_pages(self, database_id: str, title_map: dict[str, str]):
         """List all pages in a database and add to title map.
@@ -414,8 +573,16 @@ class NotionAPIWrapper:
             File upload ID (to be used with type: file_upload)
 
         Raises:
-            APIResponseError: If upload fails
+            Exception: If upload fails or file is too large
         """
+        # Check file size (Notion limit for single_part is 20MB)
+        file_size_mb = len(file_data) / (1024 * 1024)
+        if file_size_mb >= 20:
+            raise Exception(
+                f"File too large ({file_size_mb:.1f} MB). Notion's single_part upload limit is 20MB. "
+                f"File: {filename}"
+            )
+        
         headers = {
             "Authorization": f"Bearer {self._auth_token}",
             "Content-Type": "application/json",

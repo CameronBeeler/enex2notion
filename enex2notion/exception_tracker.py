@@ -220,3 +220,115 @@ class ExceptionTracker:
                 logger.debug(e, exc_info=e)
 
         logger.debug(f"Tracked partial import for note '{note_title}' in notebook '{notebook_name}'")
+
+    # New: generic special exception page and unmatched link tracking
+    def _ensure_special_child_page(self, title: str) -> str:
+        exceptions_page_id = self.ensure_exceptions_page()
+        pages = self.wrapper.search_pages(title)
+        for page in pages:
+            if page.get("parent", {}).get("page_id") == exceptions_page_id:
+                return page["id"]
+        page = self.wrapper.create_page(parent_id=exceptions_page_id, title=title)
+        return page["id"]
+
+    def track_unmatched_link(self, source_page_title: str, source_page_id: str, link_text: str, original_url: str):
+        """Record an unmatched evernote link.
+
+        Appends a bullet to Exceptions → EvernoteLinkFailure with a mention to the source page,
+        the link_text used for matching, and the original URL.
+        """
+        page_id = self._ensure_special_child_page("EvernoteLinkFailure")
+        bullet = {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [
+                    {"type": "mention", "mention": {"type": "page", "page": {"id": source_page_id}}},
+                    {"type": "text", "text": {"content": f" – '{link_text}' → {original_url}"}},
+                ]
+            }
+        }
+        try:
+            self.wrapper.append_blocks(block_id=page_id, children=[bullet])
+        except Exception as e:
+            logger.warning(f"Failed to append unmatched link entry: {e}")
+
+    def track_ambiguous_link(self, source_page_title: str, source_page_id: str, link_text: str, candidate_ids: list[tuple[str, str]]):
+        """Record an ambiguous evernote link with multiple candidate pages.
+
+        Appends a bullet to Exceptions → UnresolvableEvernoteLinks with a mention to the source page,
+        the link_text used for matching, and a sub-list of candidate page mentions.
+        """
+        page_id = self._ensure_special_child_page("UnresolvableEvernoteLinks")
+        # Parent bullet
+        parent = {
+            "object": "block",
+            "type": "bulleted_list_item",
+            "bulleted_list_item": {
+                "rich_text": [
+                    {"type": "mention", "mention": {"type": "page", "page": {"id": source_page_id}}},
+                    {"type": "text", "text": {"content": f" – ambiguous '{link_text}' (multiple pages found)"}},
+                ]
+            }
+        }
+        # Children bullets for candidates
+        children = []
+        for cid, ctitle in candidate_ids[:10]:
+            children.append({
+                "object": "block",
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {
+                    "rich_text": [
+                        {"type": "mention", "mention": {"type": "page", "page": {"id": cid}}},
+                        {"type": "text", "text": {"content": f" – {ctitle}"}},
+                    ]
+                }
+            })
+        try:
+            result = self.wrapper.append_blocks(block_id=page_id, children=[parent])
+            if result and children:
+                parent_id = result[0]["id"]
+                self.wrapper.append_blocks(block_id=parent_id, children=children)
+        except Exception as e:
+            logger.warning(f"Failed to append ambiguous link entry: {e}")
+
+    def track_duplicate_page_names(self, duplicates: dict[str, list[str]]):
+        """Record duplicate page names and link to all duplicates.
+
+        Args:
+            duplicates: mapping title -> list of page_ids with that title
+        """
+        page_id = self._ensure_special_child_page("DuplicatePageNames")
+        blocks = []
+        for title, ids in duplicates.items():
+            if len(ids) < 2:
+                continue
+            # Parent bullet with the duplicate title
+            parent = {
+                "object": "block",
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {
+                    "rich_text": [{"type": "text", "text": {"content": title or "<untitled>"}}]
+                }
+            }
+            blocks.append(parent)
+            # Append parent, then children mentions
+            try:
+                res = self.wrapper.append_blocks(block_id=page_id, children=[parent])
+                if res:
+                    parent_block_id = res[0]["id"]
+                    child_bullets = []
+                    for pid in ids[:25]:
+                        child_bullets.append({
+                            "object": "block",
+                            "type": "bulleted_list_item",
+                            "bulleted_list_item": {
+                                "rich_text": [
+                                    {"type": "mention", "mention": {"type": "page", "page": {"id": pid}}}
+                                ]
+                            }
+                        })
+                    if child_bullets:
+                        self.wrapper.append_blocks(block_id=parent_block_id, children=child_bullets)
+            except Exception as e:
+                logger.warning(f"Failed to log duplicate title '{title}': {e}")
