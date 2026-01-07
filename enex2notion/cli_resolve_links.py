@@ -1,5 +1,6 @@
 """CLI implementation for resolve-links command."""
 import json
+from pathlib import Path
 import logging
 from pathlib import Path
 
@@ -13,11 +14,9 @@ from enex2notion.link_resolution_report import (
 )
 from enex2notion.link_resolver import (
     find_evernote_links_in_page,
-    format_notion_page_url,
-    match_link_to_page,
     create_updated_rich_text,
 )
-from enex2notion.notion_api_wrapper import NotionAPIWrapper
+from enex2notion.notion_api_wrapper import NotionAPIWrapper, _extract_page_title
 from enex2notion.page_inventory_tracker import PageInventoryTracker
 from enex2notion.exception_tracker import ExceptionTracker
 
@@ -36,15 +35,43 @@ def resolve_links_command(wrapper: NotionAPIWrapper, root_id: str, args):
     matched_links = []
     unmatched_links = []
     
-    # Step 1: Collect all pages with batched inventory tracking
+    # Step 1: Collect all pages (workspace + root) with batched inventory tracking
     logger.info("=" * 80)
-    logger.info("STEP 1: Collecting all pages under root...")
+    logger.info("STEP 1: Collecting canonical page set (workspace + root)...")
     logger.info(f"Root page ID: {root_id}")
     
     # Check if we should load from/save to page list cache
     page_list_file = getattr(args, "page_list", None)
+    queue_dir = getattr(args, "queue_directory", None)
+    # Back-compat: infer directory from deprecated --queue if provided
+    deprecated_queue = getattr(args, "queue", None)
+    if not queue_dir and deprecated_queue:
+        queue_dir = deprecated_queue.parent
+    # Default queue directory if none provided: ~/Downloads/imports
+    if not queue_dir:
+        queue_dir = Path.home() / "Downloads" / "imports"
+    queue_dir.mkdir(parents=True, exist_ok=True)
+    canonical_path = queue_dir / "canonical.json"
+    unfinished_path = queue_dir / "unfinished.json"
+    completed_path = queue_dir / "completed.json"
     
-    if page_list_file and page_list_file.exists():
+    # Check if we're doing a single-page run (--page or --page-id)
+    single_page_mode = getattr(args, "page", None) or getattr(args, "page_id", None)
+    
+    # If canonical exists and we're in single-page mode, just load it (assume already clean)
+    if single_page_mode and canonical_path.exists():
+        print(f"\nLoading existing canonical: {canonical_path}")
+        logger.info(f"Single-page mode: loading canonical from {canonical_path}")
+        try:
+            with open(canonical_path, "r", encoding="utf-8") as f:
+                page_map = json.load(f)
+            logger.info(f"Loaded {len(page_map)} pages from canonical (assuming pre-cleaned)")
+            print(f"  Loaded {len(page_map)} pages from canonical")
+        except Exception as e:
+            logger.error(f"Failed to load canonical: {e}")
+            print(f"ERROR: Could not load canonical.json: {e}")
+            return
+    elif page_list_file and page_list_file.exists():
         print(f"\nLoading page list from cache: {page_list_file}")
         logger.info(f"Loading page list from: {page_list_file}")
         try:
@@ -56,68 +83,159 @@ def resolve_links_command(wrapper: NotionAPIWrapper, root_id: str, args):
             logger.error(f"Failed to load page list cache: {e}")
             print(f"ERROR: Could not load cache file: {e}")
             print("  Falling back to scanning Notion...")
-            # Use batched collection with inventory
+            # If queue-directory is provided, build canonical from workspace only (no inventory)
+            if queue_dir:
+                print("\nCollecting all accessible workspace pages (batches of 500)...")
+                page_map = wrapper.list_all_accessible_pages_batched(batch_size=500)
+            else:
+                # Use batched collection with inventory view
+                inventory = PageInventoryTracker(wrapper, root_id)
+                inventory.create_inventory_page()
+                inventory.update_status("Collecting pages...")
+                
+                def batch_handler(batch):
+                    inventory.append_page_batch(batch, set())
+                    inventory.update_status(f"Collecting pages... ({inventory.page_count} collected)")
+                
+                print("\nCollecting pages under root (batches of 500)...")
+                pages_root = wrapper.list_all_pages_batched(root_id, batch_size=500, batch_callback=batch_handler)
+                print("Collecting all accessible workspace pages (batches of 500)...")
+                pages_ws = wrapper.list_all_accessible_pages_batched(batch_size=500)
+                page_map = pages_root.copy(); page_map.update(pages_ws)
+    else:
+        if queue_dir:
+            print("\nCollecting all accessible workspace pages (batches of 500)...")
+            page_map = {}
+            def ws_batch_handler(batch):
+                # batch is id->title; merge and persist incrementally
+                page_map.update(batch)
+                try:
+                    with open(canonical_path, "w", encoding="utf-8") as f:
+                        json.dump(page_map, f, indent=2, ensure_ascii=False)
+                except Exception:
+                    pass
+                print(f"  Collected {len(page_map)} pages so far...")
+            page_map = wrapper.list_all_accessible_pages_batched(batch_size=500, batch_callback=ws_batch_handler)
+            logger.info(f"Found {len(page_map)} total pages (workspace)")
+            print(f"  Found {len(page_map)} pages (workspace)")
+        else:
+            print("\nCollecting all pages (root subtree + workspace) in batches of 500...")
+            # Initialize inventory tracker
             inventory = PageInventoryTracker(wrapper, root_id)
             inventory.create_inventory_page()
             inventory.update_status("Collecting pages...")
             
+            # Define batch handler to update inventory
             def batch_handler(batch):
                 inventory.append_page_batch(batch, set())
                 inventory.update_status(f"Collecting pages... ({inventory.page_count} collected)")
+                print(f"  Collected {inventory.page_count} pages...")
             
-            print("\nCollecting all imported pages (batches of 500)...")
-            page_map = wrapper.list_all_pages_batched(root_id, batch_size=500, batch_callback=batch_handler)
-    else:
-        print("\nCollecting all imported pages (batches of 500)...")
+            # Use batched collection for root subtree
+            pages_root = wrapper.list_all_pages_batched(root_id, batch_size=500, batch_callback=batch_handler)
+            # Workspace-wide (no callback to avoid excessive writes)
+            pages_ws = wrapper.list_all_accessible_pages_batched(batch_size=500)
+            # Merge id->title
+            page_map = pages_root.copy(); page_map.update(pages_ws)
+            
+            logger.info(f"Found {len(page_map)} total pages (merged)")
+            print(f"  Found {len(page_map)} pages (merged)")
+            
+            inventory.update_status(f"Collection complete - {len(page_map)} pages found")
         
-        # Initialize inventory tracker
-        inventory = PageInventoryTracker(wrapper, root_id)
-        inventory.create_inventory_page()
-        inventory.update_status("Collecting pages...")
-        
-        # Define batch handler to update inventory
-        def batch_handler(batch):
-            inventory.append_page_batch(batch, set())
-            inventory.update_status(f"Collecting pages... ({inventory.page_count} collected)")
-            print(f"  Collected {inventory.page_count} pages...")
-        
-        # Use batched collection
-        page_map = wrapper.list_all_pages_batched(root_id, batch_size=500, batch_callback=batch_handler)
-        
-        logger.info(f"Found {len(page_map)} total pages")
-        print(f"  Found {len(page_map)} pages")
-        
-        inventory.update_status(f"Collection complete - {len(page_map)} pages found")
-        
-        # Log duplicate page names, if any
+        # Handle duplicates and blank titles
         try:
             title_to_ids = {}
             for pid, title in page_map.items():
                 title_to_ids.setdefault(title, []).append(pid)
-            duplicates = {t: ids for t, ids in title_to_ids.items() if t is not None and len(ids) > 1}
+            
+            # Find blank titles (None or empty string)
+            blank_ids = title_to_ids.get(None, []) + title_to_ids.get("", [])
+            
+            # Find duplicate titles (more than 1 page with same title)
+            duplicates = {t: ids for t, ids in title_to_ids.items() if t and len(ids) > 1}
+            
+            # Collect all page IDs to remove from canonical
+            ids_to_remove = set()
+            
+            # Add blank titles to duplicates as "Blank-Page-Titles"
+            if blank_ids:
+                duplicates[None] = blank_ids  # Use None as key for blanks
+                ids_to_remove.update(blank_ids)
+            
+            # Add all duplicate page IDs to removal set
+            for ids in duplicates.values():
+                ids_to_remove.update(ids)
+            
+            # Log to DuplicatePageNames
+            # TODO: Add --check-duplicates flag to run just duplicate detection without link resolution
             if duplicates:
+                print(f"  Processing {len(duplicates)} duplicate/blank title groups...")
                 tracker = ExceptionTracker(wrapper, root_id)
                 tracker.track_duplicate_page_names(duplicates)
-                print(f"  Logged {len(duplicates)} duplicate title groups to Exceptions → DuplicatePageNames")
+                total_removed = len(ids_to_remove)
+                print(f"  Logged {len(duplicates)} duplicate/blank title groups to Exceptions → DuplicatePageNames")
+                print(f"  Removing {total_removed} pages from canonical (all duplicates + blanks)")
+                
+                # Remove from page_map
+                for pid in ids_to_remove:
+                    page_map.pop(pid, None)
+                
+                logger.info(f"Removed {total_removed} duplicate/blank pages from canonical")
         except Exception as e:
-            logger.warning(f"Failed to log duplicate titles: {e}")
+            logger.warning(f"Failed to handle duplicates: {e}")
         
-        # Save to cache if requested
-        if page_list_file:
+        # Save canonical collection to canonical.json (alphabetized by title)
+        try:
+            # Sort by title (case-insensitive)
+            sorted_items = sorted(page_map.items(), key=lambda x: (x[1] or "").lower())
+            sorted_page_map = dict(sorted_items)
+            with open(canonical_path, "w", encoding="utf-8") as f:
+                json.dump(sorted_page_map, f, indent=2, ensure_ascii=False)
+            logger.info(f"Saved canonical page list (alphabetized) to: {canonical_path}")
+            print(f"  Saved canonical page list (alphabetized) to: {canonical_path}")
+        except Exception as e:
+            logger.error(f"Failed to save canonical page list: {e}")
+            print(f"  Warning: Could not save canonical.json: {e}")
+        
+        # Initialize unfinished.json from canonical if not present
+        if not unfinished_path.exists():
             try:
-                page_list_file.parent.mkdir(parents=True, exist_ok=True)
-                with open(page_list_file, "w", encoding="utf-8") as f:
-                    json.dump(page_map, f, indent=2, ensure_ascii=False)
-                logger.info(f"Saved page list to: {page_list_file}")
-                print(f"  Saved page list cache to: {page_list_file}")
+                with open(unfinished_path, "w", encoding="utf-8") as f:
+                    # Preserve discovery order by writing items as an array
+                    items = [{"id": pid, "title": title} for pid, title in page_map.items()]
+                    json.dump(items, f, indent=2, ensure_ascii=False)
+                print(f"  Initialized unfinished queue at: {unfinished_path}")
             except Exception as e:
-                logger.error(f"Failed to save page list cache: {e}")
-                print(f"  Warning: Could not save cache file: {e}")
+                logger.error(f"Failed to initialize unfinished.json: {e}")
+        
+        # Touch completed.json if missing
+        if not completed_path.exists():
+            with open(completed_path, "w", encoding="utf-8") as f:
+                json.dump([], f)
+            
     
     stats.total_pages_scanned = len(page_map)
     
     # page_map is id->title now
     id_to_title = page_map
+    
+    # If --page-id specified, take precedence over all queue selection
+    single_page_id = getattr(args, "page_id", None)
+    if single_page_id:
+        title = id_to_title.get(single_page_id, "")
+        if not title:
+            try:
+                # Fallback: fetch title directly from Notion using robust extractor
+                page_obj = wrapper.client.pages.retrieve(page_id=single_page_id)
+                title = _extract_page_title(page_obj) or ""
+                if title:
+                    id_to_title[single_page_id] = title
+            except Exception:
+                title = title or ""
+        page_map_to_scan = {single_page_id: title}
+        logger.info(f"Scanning only page by ID: {single_page_id} ('{title}')")
+        print(f"\n  Analyzing single page by ID: {single_page_id} ('{title}')")
     
     # If --page specified, filter to just that page
     single_page_name = getattr(args, "page", None)
@@ -141,38 +259,26 @@ def resolve_links_command(wrapper: NotionAPIWrapper, root_id: str, args):
         page_map_to_scan = {single_page_id: single_page_name}
         logger.info(f"Scanning only page: '{single_page_name}'")
         print(f"\n  Analyzing single page: '{single_page_name}'")
-    else:
-        # id->title mapping
+    
+    # Default: scan all pages unless queue or filters override
+    if not single_page_id and not single_page_name:
         page_map_to_scan = page_map
     
     # Optional: queue-based processing
-    queue_file = getattr(args, "queue", None)
     limit = getattr(args, "limit", None)
     
-    if queue_file:
-        # Ensure queue file exists; if not, create from page_map
-        if not queue_file.exists():
-            queue_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(queue_file, "w", encoding="utf-8") as qf:
-                for pid, title in page_map.items():
-                    qf.write(f"{pid}\t{title}\n")
-            print(f"  Created queue: {queue_file}")
-        
-        # Load up to N page ids from queue
-        with open(queue_file, "r", encoding="utf-8") as qf:
-            lines = [ln.rstrip("\n") for ln in qf if ln.strip()]
-        to_process = lines[: limit if limit else len(lines)]
-        
-        # Build map to scan from queue entries (id->title)
-        page_map_to_scan = {}
-        for ln in to_process:
-            try:
-                pid, title = ln.split("\t", 1)
-                page_map_to_scan[pid] = title
-            except Exception:
-                continue
-        
-        print(f"\nQueue mode: processing {len(page_map_to_scan)} page(s) from {queue_file}")
+    # Load batch from unfinished.json if present (unless --page or --page-id is specified)
+    if not getattr(args, "page", None) and not getattr(args, "page_id", None) and unfinished_path.exists():
+        try:
+            with open(unfinished_path, "r", encoding="utf-8") as f:
+                items = json.load(f)
+            if isinstance(items, list) and items:
+                sel = items[: (limit if limit else len(items))]
+                page_map_to_scan = {it["id"]: it.get("title", "") for it in sel}
+                print(f"\nQueue mode: processing {len(page_map_to_scan)} page(s) from {unfinished_path}")
+        except Exception as e:
+            logger.warning(f"Failed to load unfinished.json: {e}. Falling back to scanning all pages in memory")
+            page_map_to_scan = page_map
     
     # Step 2: Scan for evernote:// links
     logger.info("=" * 80)
@@ -187,7 +293,10 @@ def resolve_links_command(wrapper: NotionAPIWrapper, root_id: str, args):
     with tqdm(total=len(page_map_to_scan), desc="Scanning", unit="page", ncols=80) as pbar:
         for page_id, page_title in page_map_to_scan.items():
             try:
-                # Get all blocks from this page
+                # Pass 0: normalize oversized blocks before scanning
+                from enex2notion.link_resolver import normalize_page_blocks
+                normalize_page_blocks(wrapper, page_id)
+                # Now get blocks and scan
                 blocks = wrapper.get_blocks(page_id)
                 
                 # Find evernote links in the page
@@ -214,227 +323,204 @@ def resolve_links_command(wrapper: NotionAPIWrapper, root_id: str, args):
         print("\nNo evernote:// links found. Nothing to resolve.")
         return
     
-    # Step 3: Match links to pages
-    logger.info("=" * 80)
-    logger.info("STEP 3: Matching links to pages...")
+    # Step 3–4: Per-page processing with atomic queue updates
+    import os, tempfile
+
+    def _read_json_array(path: Path) -> list[dict]:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def _write_json_atomic(path: Path, data: list[dict]):
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_path, path)
+
+    # Normalization for robust matching (casefold, collapse whitespace, strip)
+    def _norm(s: str) -> str:
+        if not s:
+            return ""
+        s = s.replace("\u00A0", " ")  # NBSP -> space
+        s = " ".join(s.split())  # collapse whitespace
+        return s.casefold()
     
-    print(f"\nMatching links to pages (mode: {args.match_mode})...")
-    
-    # Build case-insensitive title->ids index for matching
+    # Build normalized title→ids index once
     title_to_ids_ci = {}
     for pid, title in id_to_title.items():
-        key = (title or "").lower()
-        title_to_ids_ci.setdefault(key, []).append((pid, title))
+        title_to_ids_ci.setdefault(_norm(title or ""), []).append((pid, title))
+
+    # Determine if this is a full run (no --page or --page-id flag)
+    is_full_run = not getattr(args, "page", None) and not getattr(args, "page_id", None)
     
-    ambiguous_links = []
+    tracker = ExceptionTracker(wrapper, root_id)
+    from enex2notion.review_tracker import ReviewTracker
+    review = ReviewTracker(wrapper, root_id, recreate=is_full_run) if not args.dry_run else None
     
-    for link_ref in all_link_refs:
-        key = (link_ref.link_text or "").lower()
-        candidates = title_to_ids_ci.get(key, [])
-        if len(candidates) == 1:
-            matched_page_id, _matched_title = candidates[0]
-            confidence = 1.0
-        elif len(candidates) > 1:
-            # Ambiguous: log and treat as unresolved (no change to content)
-            ambiguous_links.append((link_ref, candidates))
-            matched_page_id, confidence = (None, 0.0)
-        else:
-            # Fall back to fuzzy/existing matcher using first-id map
-            title_to_id = {}
-            for pid, title in id_to_title.items():
-                t = title or ""
-                if t and t not in title_to_id:
-                    title_to_id[t] = pid
-            matched_page_id, confidence = match_link_to_page(
-                link_ref.link_text,
-                title_to_id,
-                args.match_mode
-            )
-        
-        if matched_page_id:
-            matched_page_title = id_to_title.get(matched_page_id, "")
-            matched_links.append(MatchedLink(
-                link_ref=link_ref,
-                matched_page_id=matched_page_id,
-                matched_page_title=matched_page_title,
-                confidence=confidence
-            ))
-            stats.links_matched += 1
+    # Track if we've already initialized exception pages for this run
+    exception_pages_initialized = False
+
+    # Group found link refs by page
+    refs_by_page = {}
+    for ref in all_link_refs:
+        refs_by_page.setdefault(ref.page_id, []).append(ref)
+
+    for page_id, page_title in page_map_to_scan.items():
+        page_refs = refs_by_page.get(page_id, [])
+        page_matched = []
+        page_unmatched = []
+        page_ambig = []
+        # Match within this page
+        for link_ref in page_refs:
+            key = _norm(link_ref.link_text or "")
+            candidates = title_to_ids_ci.get(key, [])
+            if len(candidates) == 1:
+                page_matched.append((link_ref, candidates[0][0]))
+            elif len(candidates) > 1:
+                page_ambig.append((link_ref, candidates))
+            else:
+                # No exact match found
+                page_unmatched.append(link_ref)
+        # Apply updates for this page (unless dry-run)
+        if not args.dry_run:
+            # Build link lookup dict: link_text (lowercase) -> target_page_id
+            from enex2notion.link_resolver import _convert_text_with_all_links
+            link_lookup = {}
+            for ref, mid in page_matched:
+                link_lookup[_norm(ref.link_text or "")] = mid
+            # Ambiguous and unmatched get None
+            for ref, cands in page_ambig:
+                link_lookup[_norm(ref.link_text or "")] = None
+            for ref in page_unmatched:
+                link_lookup[_norm(ref.link_text or "")] = None
             
-            logger.debug(f"Matched '{link_ref.link_text}' -> '{matched_page_title}' ({confidence:.0%})")
-        else:
-            unmatched_links.append(link_ref)
-            stats.links_unmatched += 1
+            # Group ALL page refs by (block_id, rich_text_index)
+            refs_by_element = {}
+            for ref in page_refs:
+                key = (ref.block_id, ref.rich_text_index)
+                refs_by_element.setdefault(key, []).append(ref)
             
-            logger.debug(f"No match found for '{link_ref.link_text}'")
-    
-    logger.info(f"Matched: {stats.links_matched}, Unmatched: {stats.links_unmatched}")
-    print(f"  Matched: {stats.links_matched}")
-    print(f"  Unmatched: {stats.links_unmatched}")
-    
-    # Step 4: Update links and mark unresolved (unless dry-run)
-    if not args.dry_run and (stats.links_matched > 0 or stats.links_unmatched > 0):
-        logger.info("=" * 80)
-        logger.info("STEP 4: Updating links...")
-        
-        if stats.links_matched:
-            print(f"\nUpdating {stats.links_matched} matched link(s)...")
-        
-        # Group matched links by block
-        links_by_block = {}
-        for match in matched_links:
-            block_id = match.link_ref.block_id
-            links_by_block.setdefault(block_id, []).append(match)
-        
-        # Group unmatched by block
-        unresolved_by_block = {}
-        for ref in unmatched_links:
-            unresolved_by_block.setdefault(ref.block_id, []).append(ref)
-        
-        # Update blocks for matches
-        with tqdm(total=len(links_by_block), desc="Updating", unit="block", ncols=80) as pbar:
-            for block_id, block_matches in links_by_block.items():
+            # Process each element that has links
+            for (block_id, rt_index), element_refs in refs_by_element.items():
                 try:
                     block = wrapper.get_block(block_id)
                     block_type = block.get("type")
                     rich_text = block.get(block_type, {}).get("rich_text", [])
-                    if not rich_text:
-                        pbar.update(1)
+                    if not rich_text or rt_index >= len(rich_text):
                         continue
-                    # Reverse apply to avoid index shifts
-                    sorted_matches = sorted(block_matches, key=lambda m: m.link_ref.rich_text_index, reverse=True)
-                    updated_rich_text = rich_text
-                    for match in sorted_matches:
-                        notion_url = format_notion_page_url(match.matched_page_id)
-                        updated_rich_text = create_updated_rich_text(
-                            updated_rich_text,
-                            match.link_ref.rich_text_index,
-                            match.link_ref.link_text,
-                            notion_url
-                        )
+                    
+                    # Get the element to process
+                    element = rich_text[rt_index]
+                    if element.get("type") != "text":
+                        continue
+                    
+                    text_content = element.get("text", {}).get("content", "")
+                    annotations = element.get("annotations", {})
+                    
+                    # Check if source element is already oversized (shouldn't happen, but detect it)
+                    if len(text_content) > 2000:
+                        logger.warning(f"Source element already exceeds 2000 chars ({len(text_content)} chars) - Notion API issue")
+                    
+                    # Convert ALL links in this element using recursive function
+                    new_elements = _convert_text_with_all_links(text_content, annotations, link_lookup)
+                    
+                    
+                    # Replace this element with the new elements
+                    updated_rich_text = rich_text[:rt_index] + new_elements + rich_text[rt_index+1:]
+                    
+                    # Final validation: split any oversized text elements
+                    from enex2notion.link_resolver import _split_all_oversized_elements
+                    updated_rich_text = _split_all_oversized_elements(updated_rich_text)
+                    
+                    # Check if rich_text array is too large (Notion limit: ~100 elements)
+                    if len(updated_rich_text) > 100:
+                        error_msg = f"Rich text array too large ({len(updated_rich_text)} elements, max ~100)"
+                        logger.warning(f"Block {block_id}: {error_msg}")
+                        # Track this failure
+                        for ref in element_refs:
+                            recreate = is_full_run and not exception_pages_initialized
+                            tracker.track_unmatched_link(
+                                page_title, page_id, ref.link_text, ref.original_url, 
+                                block_id=ref.block_id, recreate=recreate
+                            )
+                            exception_pages_initialized = True
+                        continue
+                    
                     wrapper.update_block(block_id, {block_type: {"rich_text": updated_rich_text}})
-                    stats.links_updated += len(block_matches)
-                    pbar.update(1)
+                    stats.links_updated += len(element_refs)
+                    
+                    # Log review rows for each ref in this element
+                    if review:
+                        for ref in element_refs:
+                            # Determine status per ref (matched/ambiguous/unmatched)
+                            key = _norm(ref.link_text or "")
+                            tgt_id = link_lookup.get(key)
+                            status_row = "Resolved" if tgt_id else ("Ambiguous" if any(r[0] == ref for r in [*page_ambig]) else "Unresolved")
+                            tgt_title = id_to_title.get(tgt_id, "") if tgt_id else None
+                            review.log_link(
+                                link_text=ref.link_text,
+                                source_page_title=page_title,
+                                source_page_id=page_id,
+                                original_url=ref.original_url,
+                                status=status_row,
+                                source_block_id=ref.block_id,
+                                target_page_id=tgt_id,
+                                target_page_title=tgt_title,
+                            )
                 except Exception as e:
-                    logger.error(f"Failed to update block {block_id}: {e}")
-                    pbar.update(1)
-                    continue
-        
-        # Add ambiguous markers and log
-        if ambiguous_links:
-            tracker = ExceptionTracker(wrapper, root_id)
-            print(f"\nLogging {len(ambiguous_links)} ambiguous link(s) to Exceptions and marking inline...")
-            # Group by block for efficient updates
-            ambiguous_by_block = {}
-            for ref, candidates in ambiguous_links:
-                ambiguous_by_block.setdefault(ref.block_id, []).append((ref, candidates))
-            with tqdm(total=len(ambiguous_by_block), desc="Ambiguous", unit="block", ncols=80) as pbarA:
-                for block_id, items in ambiguous_by_block.items():
-                    try:
-                        block = wrapper.get_block(block_id)
-                        block_type = block.get("type")
-                        rich_text = block.get(block_type, {}).get("rich_text", [])
-                        if not rich_text:
-                            pbarA.update(1)
-                            continue
-                        updated = list(rich_text)
-                        for ref, candidates in sorted(items, key=lambda r: r[0].rich_text_index, reverse=True):
-                            insert_index = min(ref.rich_text_index + 1, len(updated))
-                            marker = {
-                                "type": "text",
-                                "text": {"content": " ⚠ ambiguous"},
-                                "annotations": {"color": "orange"}
-                            }
-                            updated = updated[:insert_index] + [marker] + updated[insert_index:]
-                            tracker.track_ambiguous_link(ref.page_title, ref.page_id, ref.link_text, candidates)
-                        wrapper.update_block(block_id, {block_type: {"rich_text": updated}})
-                        pbarA.update(1)
-                    except Exception as e:
-                        logger.warning(f"Failed to mark ambiguous in block {block_id}: {e}")
-                        pbarA.update(1)
-                        continue
-        
-        # Add unresolved markers and track exceptions
-        if stats.links_unmatched:
-            print(f"\nMarking {stats.links_unmatched} unmatched link(s) and logging exceptions...")
-            tracker = tracker if 'tracker' in locals() else ExceptionTracker(wrapper, root_id)
-            with tqdm(total=len(unresolved_by_block), desc="Marking", unit="block", ncols=80) as pbar2:
-                for block_id, refs in unresolved_by_block.items():
-                    try:
-                        block = wrapper.get_block(block_id)
-                        block_type = block.get("type")
-                        rich_text = block.get(block_type, {}).get("rich_text", [])
-                        if not rich_text:
-                            pbar2.update(1)
-                            continue
-                        updated = list(rich_text)
-                        # Insert markers after each unresolved item; reverse order
-                        for ref in sorted(refs, key=lambda r: r.rich_text_index, reverse=True):
-                            insert_index = min(ref.rich_text_index + 1, len(updated))
-                            marker = {
-                                "type": "text",
-                                "text": {"content": " 🛑 unresolved"},
-                                "annotations": {"color": "red"}
-                            }
-                            updated = updated[:insert_index] + [marker] + updated[insert_index:]
-                            # Log exception entry
-                            tracker.track_unmatched_link(ref.page_title, ref.page_id, ref.link_text, ref.original_url)
-                        wrapper.update_block(block_id, {block_type: {"rich_text": updated}})
-                        pbar2.update(1)
-                    except Exception as e:
-                        logger.warning(f"Failed to mark unresolved in block {block_id}: {e}")
-                        pbar2.update(1)
-                        continue
-        
-        logger.info(f"Successfully updated {stats.links_updated} link(s)")
-        print(f"\n  Successfully updated {stats.links_updated} link(s)")
-    
-    # Step 5: Generate report
-    logger.info("=" * 80)
-    logger.info("STEP 5: Generating report...")
-    
-    print_resolution_report(
-        stats,
-        matched_links,
-        unmatched_links,
-        verbose=args.verbose,
-        dry_run=args.dry_run
-    )
-    
-    # Queue maintenance: remove processed pages and log outcomes
-    if queue_file and not args.dry_run:
-        processed_ids = set(page_map_to_scan.values())
-        try:
-            with open(queue_file, "r", encoding="utf-8") as qf:
-                lines = [ln.rstrip("\n") for ln in qf if ln.strip()]
-            remaining = []
-            finished_path = queue_file.parent / "finished.list"
-            failed_path = queue_file.parent / "failed.list"
-            # Determine per-page status: if any unmatched refs in that page, still consider finished (we kept the link+marker)
-            # Fail only if scanning/updating the page raised an exception (not tracked here); so we move all processed to finished.
-            processed_lines = set()
-            for pid, title in page_map_to_scan.items():
-                processed_lines.add(f"{pid}\t{title}")
-            for ln in lines:
-                if ln in processed_lines:
-                    # Move to finished
-                    with open(finished_path, "a", encoding="utf-8") as fp:
-                        fp.write(ln + "\n")
-                else:
-                    remaining.append(ln)
-            with open(queue_file, "w", encoding="utf-8") as qf:
-                qf.write("\n".join(remaining) + ("\n" if remaining else ""))
-            print(f"\nQueue updated: {len(processed_lines)} moved to finished, {len(remaining)} remaining")
-        except Exception as e:
-            logger.warning(f"Queue maintenance failed: {e}")
-    
-    if args.summary:
-        save_resolution_report(
-            stats,
-            matched_links,
-            unmatched_links,
-            args.summary,
-            dry_run=args.dry_run
-        )
-    
+                    error_msg = str(e)
+                    logger.warning(f"Failed updating block {block_id} element {rt_index}: {error_msg}")
+                    # Track failures in exception page
+                    for ref in element_refs:
+                        recreate = is_full_run and not exception_pages_initialized
+                        tracker.track_unmatched_link(
+                            page_title, page_id, ref.link_text, 
+                            f"{ref.original_url} (Update failed: {error_msg[:100]})", 
+                            block_id=ref.block_id, recreate=recreate
+                        )
+                        exception_pages_initialized = True
+            
+            # Track exceptions
+            for ref, cands in page_ambig:
+                recreate = is_full_run and not exception_pages_initialized
+                tracker.track_ambiguous_link(page_title, page_id, ref.link_text, cands, block_id=ref.block_id, recreate=recreate)
+                exception_pages_initialized = True
+            for ref in page_unmatched:
+                recreate = is_full_run and not exception_pages_initialized
+                tracker.track_unmatched_link(page_title, page_id, ref.link_text, ref.original_url, block_id=ref.block_id, recreate=recreate)
+                exception_pages_initialized = True
+            
+            # Compute page status for queue update
+            matched_count = len(page_matched)
+            ambiguous_count = len(page_ambig)
+            unmatched_count = len(page_unmatched)
+            status = (
+                "Ambiguous" if ambiguous_count and not matched_count and not unmatched_count else
+                "Unresolved" if unmatched_count and not matched_count and not ambiguous_count else
+                "Partial" if ambiguous_count or unmatched_count else
+                "Resolved"
+            )
+            # Atomic JSON updates
+            try:
+                # Remove from unfinished
+                cur_unf = _read_json_array(unfinished_path)
+                cur_unf = [it for it in cur_unf if it.get("id") != page_id]
+                _write_json_atomic(unfinished_path, cur_unf)
+                # Append to completed
+                cur_comp = _read_json_array(completed_path)
+                cur_comp.append({"id": page_id, "title": page_title, "status": status})
+                _write_json_atomic(completed_path, cur_comp)
+                print(f"queued → completed: {page_title} ({page_id}) [status={status}]")
+            except Exception as e:
+                logger.warning(f"Queue update failed for {page_id}: {e}")
+        # Update global stats
+        stats.links_matched += len(page_matched)
+        stats.links_unmatched += len(page_unmatched)
+
+    logger.info(f"Matched: {stats.links_matched}, Unmatched: {stats.links_unmatched}")
+    print(f"  Matched: {stats.links_matched}")
+    print(f"  Unmatched: {stats.links_unmatched}")
     logger.info("Link resolution complete")

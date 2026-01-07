@@ -91,7 +91,7 @@ class NotionAPIWrapper:
             logger.error(f"Search failed: {e}")
             return []
 
-    def create_page(self, parent_id: str, title: str, properties: dict[str, Any] | None = None) -> dict[str, Any]:
+    def create_page(self, parent_id: str | None, title: str, properties: dict[str, Any] | None = None) -> dict[str, Any]:
         """Create a new page.
 
         Args:
@@ -103,15 +103,23 @@ class NotionAPIWrapper:
             Created page object
         """
         if properties:
-            # Creating a page in a database
+            # Creating a page in a database; if parent_id is None, create in workspace
+            if parent_id:
+                parent = {"type": "database_id", "database_id": parent_id}
+            else:
+                parent = {"type": "workspace", "workspace": True}
             page_data = {
-                "parent": {"type": "database_id", "database_id": parent_id},
+                "parent": parent,
                 "properties": properties,
             }
         else:
-            # Creating a regular page
+            # Creating a regular page; if parent_id is None, create as top-level in workspace
+            if parent_id:
+                parent = {"type": "page_id", "page_id": parent_id}
+            else:
+                parent = {"type": "workspace", "workspace": True}
             page_data = {
-                "parent": {"type": "page_id", "page_id": parent_id},
+                "parent": parent,
                 "properties": {
                     "title": {
                         "title": [{"type": "text", "text": {"content": title}}]
@@ -123,7 +131,7 @@ class NotionAPIWrapper:
         return self.client.pages.create(**page_data)
 
     def create_database(
-        self, parent_id: str, title: str, properties_schema: dict[str, Any]
+        self, parent_id: str | None, title: str, properties_schema: dict[str, Any]
     ) -> dict[str, Any]:
         """Create a new database.
 
@@ -138,8 +146,12 @@ class NotionAPIWrapper:
         Note: Uses raw requests instead of notion-client due to library bug
               that drops the 'properties' parameter in version 2.7.0
         """
+        if parent_id:
+            parent = {"type": "page_id", "page_id": parent_id}
+        else:
+            parent = {"type": "workspace", "workspace": True}
         database_data = {
-            "parent": {"type": "page_id", "page_id": parent_id},
+            "parent": parent,
             "title": [{"type": "text", "text": {"content": title}}],
             "properties": properties_schema,
         }
@@ -288,6 +300,15 @@ class NotionAPIWrapper:
             logger.error(f"Failed to update block {block_id}: {e}")
             raise
 
+    def delete_block(self, block_id: str) -> dict[str, Any]:
+        """Archive (delete) a block or page by ID."""
+        time.sleep(self._rate_limit_delay)
+        try:
+            return self.client.blocks.delete(block_id=block_id)
+        except APIResponseError as e:
+            logger.error(f"Failed to delete block {block_id}: {e}")
+            raise
+
     def list_all_pages_recursive(
         self, root_id: str, title_map: dict[str, str] | None = None
     ) -> dict[str, str]:
@@ -406,6 +427,55 @@ class NotionAPIWrapper:
         
         return all_pages
     
+    def list_all_accessible_pages_batched(
+        self, batch_size: int = 500, batch_callback=None
+    ) -> dict[str, str]:
+        """Enumerate all pages and databases accessible to the integration.
+
+        Uses the Notion search API (no query) to page through all accessible objects,
+        then expands each database to include all of its records.
+
+        Returns id->title map.
+        """
+        all_pages: dict[str, str] = {}
+        batch: dict[str, str] = {}
+        start_cursor = None
+        while True:
+            time.sleep(self._rate_limit_delay)
+            try:
+                resp = self.client.search(start_cursor=start_cursor, page_size=100)
+                results = resp.get("results", [])
+                for obj in results:
+                    obj_id = obj.get("id")
+                    obj_type = obj.get("object")
+                    title = ""
+                    if obj_type == "page":
+                        title = _extract_page_title(obj) or ""
+                        all_pages[obj_id] = title
+                        batch[obj_id] = title
+                    elif obj_type == "database":
+                        # capture database title and expand records
+                        tarr = obj.get("title", [])
+                        if tarr:
+                            title = tarr[0].get("plain_text", "")
+                        all_pages[obj_id] = title
+                        batch[obj_id] = title
+                        # expand database records
+                        self._list_database_pages_batched(obj_id, all_pages, batch, batch_size, batch_callback)
+                    # flush batch
+                    if len(batch) >= batch_size and batch_callback:
+                        batch_callback(batch.copy())
+                        batch.clear()
+                if not resp.get("has_more"):
+                    break
+                start_cursor = resp.get("next_cursor")
+            except APIResponseError as e:
+                logger.warning(f"Search pagination failed: {e}")
+                break
+        if batch and batch_callback:
+            batch_callback(batch.copy())
+        return all_pages
+
     def _list_database_pages_batched(
         self, database_id: str, all_pages: dict, batch: dict, batch_size: int, batch_callback
     ):

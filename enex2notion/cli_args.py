@@ -35,6 +35,10 @@ def parse_args(argv):
             ),
             "metavar": "NAME",
         },
+        "--page-id": {
+            "help": "(resolve-links only) analyze only a specific page by exact Notion page ID",
+            "metavar": "ID",
+        },
         "--page-list": {
             "type": Path,
             "help": (
@@ -57,10 +61,16 @@ def parse_args(argv):
             "action": "store_true",
             "help": "(resolve-links only) show matches without updating links",
         },
+        "--queue-directory": {
+            "type": Path,
+            "metavar": "DIR",
+            "help": "(resolve-links only) directory to store canonical.json, unfinished.json, completed.json",
+        },
+        # Deprecated; kept for backward compatibility during transition
         "--queue": {
             "type": Path,
             "metavar": "FILE",
-            "help": "(resolve-links only) path to queue file (TSV: page_id\tpage_title). If missing, it will be created from the collected pages.",
+            "help": argparse.SUPPRESS,
         },
         "--limit": {
             "type": int,

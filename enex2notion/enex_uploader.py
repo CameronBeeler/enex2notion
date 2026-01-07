@@ -187,6 +187,15 @@ def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_d
     clear_warnings()
     init_warnings()
     
+    # CRITICAL: Ensure title is never blank/None to prevent orphaned pages
+    if not note.title or not note.title.strip():
+        note.title = "[Untitled Note]"
+        logger.warning(f"Note had blank title - assigned default: {note.title}")
+        if not errors:
+            errors = []
+        if "Note had no title" not in str(errors):
+            errors.append("Note had no title in Evernote - assigned default title")
+    
     logger.debug(f"Creating new page for note '{note.title}'")
     logger.debug(f"  Parent ID: {root_id}")
     logger.debug(f"  Is database: {is_database}")

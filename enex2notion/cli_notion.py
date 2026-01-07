@@ -87,6 +87,11 @@ def get_import_root(wrapper, title):
     Returns:
         Root page ID as string
     """
+    # Special workspace sentinel values allow writing directly under the workspace
+    if title in {"$WORKSPACE", "WORKSPACE", "__WORKSPACE__"}:
+        logger.info("Using workspace as root (no page parent). New pages/databases will be top-level.")
+        return None
+    
     logger.info(f"Searching for root page '{title}'...")
     
     # Search for existing page
