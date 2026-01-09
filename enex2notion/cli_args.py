@@ -28,6 +28,10 @@ def parse_args(argv):
             "action": "store_true",
             "help": "resolve evernote:// links in imported Notion pages",
         },
+        "--check-duplicates": {
+            "action": "store_true",
+            "help": "scan workspace and create DuplicatePageNames report without resolving links",
+        },
         "--page": {
             "help": (
                 "(resolve-links only) analyze only a specific page by name"
@@ -145,6 +149,15 @@ def parse_args(argv):
             "metavar": "FILE",
             "help": "save rejected/unsupported files report to CSV file",
         },
+        "--note": {
+            "help": "import only a specific note by exact title from ENEX file(s)",
+            "metavar": "TITLE",
+        },
+        "--note-index": {
+            "type": int,
+            "help": "import only note at specific index (1-based) from ENEX file",
+            "metavar": "N",
+        },
         "--log": {
             "type": Path,
             "metavar": "FILE",
@@ -188,6 +201,16 @@ def parse_args(argv):
             )
         args.command = "resolve-links"
         # Set enex_input to None in resolve-links mode (not used)
+        args.enex_input = None
+    elif args.check_duplicates:
+        # Check-duplicates mode: token is required, enex_input is not
+        if not args.token:
+            parser.error(
+                "--token or --use-env is required for --check-duplicates.\n"
+                "Create an Integration token at https://www.notion.com/my-integrations"
+            )
+        args.command = "check-duplicates"
+        # Set enex_input to None (not used)
         args.enex_input = None
     else:
         # Upload mode: enex_input is required

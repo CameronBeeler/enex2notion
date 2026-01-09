@@ -47,6 +47,7 @@ class LinkReference:
     rich_text_index: int
     rich_text_item: dict[str, Any]
     pass_type: str  # "markdown" or "href"
+    has_unresolved_marker: bool = False  # True if "🛑 unresolved: " prefix exists
 
 
 def remove_hyphens(page_id: str) -> str:
@@ -280,6 +281,7 @@ def _scan_block_for_links(page_id: str, page_title: str, block: dict[str, Any]) 
         href = rich_text_item.get("href", "")
         
         # PASS 1: Find ALL markdown format links [note-name](evernote://url)
+        # Also check for 🛑 unresolved: prefix from previous failed attempts
         markdown_pattern = r'\[([^\]]*)\]\((evernote[a-zA-Z0-9\-._~:/?#\[\]@!$&\'()*+,;=%]*)\)'
         markdown_matches = list(re.finditer(markdown_pattern, text_content))
         
@@ -288,12 +290,22 @@ def _scan_block_for_links(page_id: str, page_title: str, block: dict[str, Any]) 
             for match in markdown_matches:
                 note_name = match.group(1)
                 url = match.group(2)
+                
+                # Check if link has unresolved marker before it
+                has_unresolved_marker = False
+                marker_prefix = "🛑 unresolved: "
+                check_start = max(0, match.start() - len(marker_prefix))
+                prefix_text = text_content[check_start:match.start()]
+                if prefix_text == marker_prefix:
+                    has_unresolved_marker = True
+                
                 links.append(LinkReference(
                     page_id=page_id, page_title=page_title, block_id=block_id,
                     block_type=block_type, link_text=note_name, original_url=url,
                     rich_text_index=idx, rich_text_item=rich_text_item, pass_type="markdown",
+                    has_unresolved_marker=has_unresolved_marker,
                 ))
-                logger.debug(f"Pass 1: [{note_name}]({url})")
+                logger.debug(f"Pass 1: [{note_name}]({url}) (marker={has_unresolved_marker})")
         
         # PASS 2: evernote:// in href attribute (only if no markdown links found)
         elif href and EVERNOTE_URL_PATTERN.match(href):
@@ -313,7 +325,13 @@ def create_updated_rich_text(
     link_ref: LinkReference,
     target_page_id: str | None
 ) -> list[dict[str, Any]]:
-    """Create updated rich_text with evernote:// link converted to inline page link."""
+    """Create updated rich_text with evernote:// link converted to inline page link.
+    
+    Handles 🛑 unresolved: marker:
+    - If converting successfully and marker exists, remove it
+    - If conversion fails and no marker exists, add it
+    - If conversion fails and marker exists, leave it
+    """
     if link_ref.rich_text_index >= len(original_rich_text):
         logger.error(f"Invalid rich_text_index {link_ref.rich_text_index}")
         return original_rich_text
@@ -324,8 +342,9 @@ def create_updated_rich_text(
     if link_ref.pass_type == "markdown":
         # Pass 1: Split into prefix + link + suffix
         content = item.get("text", {}).get("content", "")
-        new_elements = _convert_markdown_link(
-            content, link_ref.link_text, target_page_id, annotations
+        new_elements = _convert_markdown_link_with_marker(
+            content, link_ref.link_text, link_ref.original_url, target_page_id, 
+            annotations, link_ref.has_unresolved_marker
         )
         result = (
             original_rich_text[:link_ref.rich_text_index] +
@@ -345,6 +364,74 @@ def create_updated_rich_text(
     
     # Split any oversized text elements in the entire array
     return _split_all_oversized_elements(result)
+
+
+def _convert_markdown_link_with_marker(
+    content: str, note_name: str, url: str, target_page_id: str | None, 
+    annotations: dict, has_existing_marker: bool
+) -> list[dict[str, Any]]:
+    """Convert markdown [note-name](evernote://url) to inline page link elements.
+    
+    Handles 🛑 unresolved: marker intelligently as a SEPARATE rich_text element:
+    - If resolved and marker exists: Remove marker element, create mention
+    - If resolved and no marker: Create mention
+    - If unresolved and no marker: Add marker element before link text
+    - If unresolved and marker exists: Keep existing marker element
+    """
+    MARKER_TEXT = "🛑 unresolved: "
+    
+    # Find the markdown link pattern
+    markdown_pattern = r'\[([^\]]*)\]\((evernote[a-zA-Z0-9\-._~:/?#\[\]@!$&\'()*+,;=%]*)\)'
+    match = re.search(markdown_pattern, content)
+    
+    if not match:
+        return _split_text_if_needed(content, annotations)
+    
+    # Extract parts - check if marker is in prefix
+    prefix = content[:match.start()]
+    link_markdown = content[match.start():match.end()]
+    suffix = content[match.end():]
+    
+    # Remove marker from prefix if it exists
+    if has_existing_marker and prefix.endswith(MARKER_TEXT):
+        prefix = prefix[:-len(MARKER_TEXT)]
+    
+    result = []
+    
+    # Add prefix if exists
+    if prefix:
+        result.extend(_split_text_if_needed(prefix, annotations))
+    
+    # Add the link/mention/marker
+    if target_page_id:
+        # Successfully resolved - create mention (marker already removed from prefix)
+        result.append(_make_inline_link(note_name, target_page_id, annotations))
+    else:
+        # Unresolved - add marker as separate element
+        if not has_existing_marker:
+            # Add marker as its own text element
+            result.append({
+                "type": "text",
+                "text": {"content": MARKER_TEXT},
+                "annotations": {
+                    "bold": False,
+                    "italic": False,
+                    "strikethrough": False,
+                    "underline": False,
+                    "code": False,
+                    "color": "default"
+                }
+            })
+        # Note: If marker exists, it's already in the prefix, so don't add again
+        
+        # Add the original markdown link text as separate element
+        result.extend(_split_text_if_needed(link_markdown, annotations))
+    
+    # Add suffix
+    if suffix:
+        result.extend(_split_text_if_needed(suffix, annotations))
+    
+    return result
 
 
 def _convert_markdown_link(

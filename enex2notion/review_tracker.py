@@ -41,8 +41,13 @@ class ReviewTracker:
         return self.root_id
 
     def ensure_db(self) -> str:
-        """Get or create review database under Exceptions page."""
-        if self._db_id and not self.recreate:
+        """Get or create review database under Exceptions page.
+        
+        CRITICAL: This caches the database ID after first call to prevent
+        creating multiple databases.
+        """
+        # Return cached ID if already initialized
+        if self._db_id:
             return self._db_id
         
         exceptions_page_id = self._find_exceptions_page()
@@ -64,20 +69,22 @@ class ReviewTracker:
                     logger.info(f"Deleted {deleted_count} duplicate review databases")
             except Exception as e:
                 logger.warning(f"Failed to delete existing databases: {e}")
+            
+            # Reset recreate flag after deletion to prevent repeated deletions
+            self.recreate = False
         
-        # Try to find existing database (if not recreating) - use FIRST match
-        if not self.recreate:
-            try:
-                matches = self.wrapper.search_pages(REVIEW_DB_TITLE, include_databases=True)
-                for m in matches:
-                    if m.get("object") == "database" and m.get("parent", {}).get("page_id") == exceptions_page_id:
-                        self._db_id = m["id"]
-                        logger.debug(f"Found existing review database: {self._db_id}")
-                        return self._db_id
-            except Exception as e:
-                logger.warning(f"Failed to search for existing database: {e}")
+        # Try to find existing database - use FIRST match
+        try:
+            matches = self.wrapper.search_pages(REVIEW_DB_TITLE, include_databases=True)
+            for m in matches:
+                if m.get("object") == "database" and m.get("parent", {}).get("page_id") == exceptions_page_id:
+                    self._db_id = m["id"]
+                    logger.info(f"Found existing review database: {self._db_id}")
+                    return self._db_id
+        except Exception as e:
+            logger.warning(f"Failed to search for existing database: {e}")
         
-        # Create new database
+        # Create new database (only if none found)
         logger.info(f"Creating new review database under Exceptions page")
         schema = {
             "Page-Title": {"title": {}},  # The visible link text
@@ -96,6 +103,7 @@ class ReviewTracker:
         }
         db = self.wrapper.create_database(exceptions_page_id, REVIEW_DB_TITLE, schema)
         self._db_id = db["id"]
+        logger.info(f"Created new review database: {self._db_id}")
         return self._db_id
 
     def log_link(self,

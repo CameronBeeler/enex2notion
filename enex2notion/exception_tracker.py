@@ -4,6 +4,7 @@ Manages the "Exceptions" summary page structure with real-time updates:
 - Root Page → Exceptions (page) → Notebook.enex (pages) → Links to partial import notes
 """
 import logging
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -243,16 +244,25 @@ class ExceptionTracker:
         if recreate:
             pages = self.wrapper.search_pages(title)
             deleted_count = 0
+            deleted_ids = []
             for page in pages:
                 if page.get("parent", {}).get("page_id") == exceptions_page_id:
                     try:
-                        self.wrapper.delete_block(block_id=page["id"])
+                        page_id = page["id"]
+                        self.wrapper.delete_block(block_id=page_id)
+                        deleted_ids.append(page_id)
                         deleted_count += 1
-                        logger.info(f"Deleted existing exception page: {title} ({page['id']})")
+                        logger.info(f"Deleted existing exception page: {title} ({page_id})")
                     except Exception as e:
                         logger.warning(f"Failed to delete page '{title}' ({page['id']}): {e}")
-            if deleted_count > 1:
-                logger.info(f"Deleted {deleted_count} duplicate '{title}' pages")
+            
+            if deleted_count > 0:
+                if deleted_count > 1:
+                    logger.info(f"Deleted {deleted_count} duplicate '{title}' pages")
+                # Wait for deletion to propagate in Notion's system
+                logger.debug(f"Waiting 2s for deletion to propagate...")
+                time.sleep(2)
+            
             # Clear cache since we deleted
             self._special_pages_cache.pop(title, None)
         

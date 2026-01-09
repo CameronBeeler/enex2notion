@@ -8,8 +8,9 @@ that silently drops the 'properties' parameter.
 """
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 import requests
+from requests.exceptions import Timeout, ConnectionError
 
 from notion_client import Client
 from notion_client.errors import APIResponseError
@@ -17,6 +18,57 @@ from notion_client.errors import APIResponseError
 logger = logging.getLogger(__name__)
 
 NOTION_API_VERSION = "2022-06-28"
+
+
+def _retry_on_transient_errors(func: Callable, max_retries: int = 3, initial_delay: float = 1.0) -> Any:
+    """Retry a function call on transient errors with exponential backoff.
+    
+    Args:
+        func: Function to call
+        max_retries: Maximum number of retry attempts
+        initial_delay: Initial delay in seconds (doubles each retry)
+    
+    Returns:
+        Function result
+    
+    Raises:
+        Last exception if all retries exhausted
+    """
+    delay = initial_delay
+    last_exception = None
+    
+    for attempt in range(max_retries + 1):
+        try:
+            return func()
+        except (Timeout, ConnectionError, APIResponseError) as e:
+            last_exception = e
+            
+            # Check if error is transient (retryable)
+            is_transient = False
+            error_str = str(e).lower()
+            
+            if isinstance(e, (Timeout, ConnectionError)):
+                is_transient = True
+            elif isinstance(e, APIResponseError):
+                # Retry on 502 (Bad Gateway), 503 (Service Unavailable), 429 (Rate Limit)
+                if hasattr(e, 'code'):
+                    is_transient = e.code in [502, 503, 429, 500]
+                else:
+                    is_transient = any(x in error_str for x in ['502', '503', '429', '500', 'bad gateway', 'timeout'])
+            
+            if is_transient and attempt < max_retries:
+                logger.warning(f"Transient error (attempt {attempt + 1}/{max_retries + 1}): {e}")
+                logger.info(f"Retrying in {delay:.1f}s...")
+                time.sleep(delay)
+                delay *= 2  # Exponential backoff
+            else:
+                # Non-transient error or max retries reached
+                if attempt >= max_retries:
+                    logger.error(f"Max retries ({max_retries}) exhausted. Last error: {e}")
+                raise
+    
+    # Should not reach here, but raise last exception if we somehow do
+    raise last_exception
 
 
 class NotionAPIWrapper:
@@ -28,8 +80,8 @@ class NotionAPIWrapper:
         Args:
             auth_token: Notion Integration token (starts with secret_)
         """
-        # Increase timeout for large file uploads (default is 60s)
-        self.client = Client(auth=auth_token, timeout_ms=300000)  # 5 minutes
+        # Increase timeout for large file uploads and slow blocks (default is 60s)
+        self.client = Client(auth=auth_token, timeout_ms=600000)  # 10 minutes
         self._auth_token = auth_token  # Store for raw API calls
         self._rate_limit_delay = 0.35  # ~3 requests/second
 
@@ -259,17 +311,31 @@ class NotionAPIWrapper:
                 params["start_cursor"] = start_cursor
 
             try:
-                response = self.client.blocks.children.list(**params)
+                # Wrap API call with retry logic
+                response = _retry_on_transient_errors(lambda: self.client.blocks.children.list(**params))
                 blocks = response.get("results", [])
                 all_blocks.extend(blocks)
 
                 # Check for nested children
                 for block in blocks:
                     if block.get("has_children"):
-                        # Recursively get children
-                        nested = self.get_blocks(block["id"], page_size)
-                        # Store nested children in the block
-                        block["_children"] = nested
+                        # Recursively get children, but handle unsupported block types
+                        try:
+                            nested = self.get_blocks(block["id"], page_size)
+                            # Store nested children in the block
+                            block["_children"] = nested
+                        except APIResponseError as e:
+                            # Check if it's an unsupported block type error
+                            error_msg = str(e).lower()
+                            if "not supported via the api" in error_msg:
+                                block_type = block.get("type", "unknown")
+                                logger.warning(f"Skipping unsupported block type '{block_type}' (block {block['id']}): {e}")
+                                # Mark block as having unsupported children so we can skip it later
+                                block["_unsupported"] = True
+                                block["_children"] = []
+                            else:
+                                # Re-raise if it's a different error
+                                raise
 
                 # Check if there are more pages
                 if not response.get("has_more"):
@@ -295,7 +361,7 @@ class NotionAPIWrapper:
         time.sleep(self._rate_limit_delay)
 
         try:
-            return self.client.blocks.update(block_id=block_id, **block_data)
+            return _retry_on_transient_errors(lambda: self.client.blocks.update(block_id=block_id, **block_data))
         except APIResponseError as e:
             logger.error(f"Failed to update block {block_id}: {e}")
             raise

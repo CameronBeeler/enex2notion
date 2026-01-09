@@ -88,21 +88,32 @@ class EnexUploader(object):
         self.notebook_root = None
         self.notebook_schema = None  # Store database schema if in DB mode
 
-    def upload_notebook(self, enex_file: Path) -> NotebookStats:
+    def upload_notebook(self, enex_file: Path, note_title: str | None = None, note_index: int | None = None) -> NotebookStats:
         """Process a single notebook using single-pass parsing.
+
+        Args:
+            enex_file: Path to ENEX file
+            note_title: Optional filter to import only note with exact title
+            note_index: Optional filter to import only note at 1-based index
 
         Returns:
             NotebookStats with results of the import
         """
         notebook_name = enex_file.stem
-        logger.info(f"Processing notebook '{notebook_name}'...")
+        
+        if note_title:
+            logger.info(f"Processing notebook '{notebook_name}' (filtering for note: '{note_title}')...")
+        elif note_index:
+            logger.info(f"Processing notebook '{notebook_name}' (filtering for note index: {note_index})...")
+        else:
+            logger.info(f"Processing notebook '{notebook_name}'...")
 
         # Initialize stats
         notebook_stats = NotebookStats(notebook_name=notebook_name, enex_file=enex_file)
 
-        # Phase 1: Parse all notes in single pass
+        # Phase 1: Parse all notes in single pass (with optional filtering)
         logger.debug(f"Parsing ENEX file '{enex_file.name}'...")
-        parse_stats = parse_all_notes(enex_file)
+        parse_stats = parse_all_notes(enex_file, note_title_filter=note_title, note_index_filter=note_index)
         notebook_stats.total = parse_stats.total
 
         logger.info(f"Parsed {parse_stats.total} notes: {parse_stats.successful} successful, {parse_stats.failed} failed")

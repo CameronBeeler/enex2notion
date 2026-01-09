@@ -6,6 +6,7 @@ from enex2notion.cli_args import parse_args
 from enex2notion.cli_logging import setup_logging
 from enex2notion.cli_notion import get_root
 from enex2notion.cli_requirements import validate_python_version, validate_requirements, check_optional_tools
+from enex2notion.cli_check_duplicates import check_duplicates_command
 from enex2notion.cli_resolve_links import resolve_links_command
 from enex2notion.cli_upload import EnexUploader
 from enex2notion.rejected_files_tracker import RejectedFilesTracker
@@ -28,6 +29,8 @@ def cli(argv):
     # Route to appropriate command
     if hasattr(args, "command") and args.command == "resolve-links":
         _resolve_links_cli(args)
+    elif hasattr(args, "command") and args.command == "check-duplicates":
+        _check_duplicates_cli(args)
     else:
         _upload_cli(args)
 
@@ -56,7 +59,9 @@ def _upload_cli(args):
     summary = ImportSummary()
 
     # Process all input files/directories
-    _process_input(enex_uploader, args.enex_input, summary)
+    _process_input(enex_uploader, args.enex_input, summary, 
+                   note_title=getattr(args, 'note', None), 
+                   note_index=getattr(args, 'note_index', None))
 
     # Mark import as complete
     summary.complete()
@@ -143,15 +148,26 @@ def _resolve_links_cli(args):
     resolve_links_command(wrapper, root_id, args)
 
 
-def _process_input(enex_uploader: EnexUploader, enex_input: list[Path], summary: ImportSummary):
+def _check_duplicates_cli(args):
+    """Execute the check-duplicates command."""
+    # Validate token and get root page
+    wrapper, root_id = get_root(args.token, args.root_page)
+    
+    # Execute duplicate checking
+    check_duplicates_command(wrapper, root_id, args)
+
+
+def _process_input(enex_uploader: EnexUploader, enex_input: list[Path], summary: ImportSummary, note_title: str | None = None, note_index: int | None = None):
     for path in enex_input:
         if path.is_dir():
+            if note_title or note_index:
+                logger.warning("Note filtering (--note or --note-index) with directory input will apply to ALL ENEX files in directory")
             logger.info(f"Processing directory '{path.name}'...")
             for enex_file in sorted(path.glob("**/*.enex")):
-                notebook_stats = enex_uploader.upload_notebook(enex_file)
+                notebook_stats = enex_uploader.upload_notebook(enex_file, note_title=note_title, note_index=note_index)
                 summary.add_notebook(notebook_stats)
         else:
-            notebook_stats = enex_uploader.upload_notebook(path)
+            notebook_stats = enex_uploader.upload_notebook(path, note_title=note_title, note_index=note_index)
             summary.add_notebook(notebook_stats)
 
 

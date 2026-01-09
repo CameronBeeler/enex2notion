@@ -165,33 +165,60 @@ def _is_banned_extension(filename):
     }
 
 
-def parse_all_notes(enex_file: Path) -> ParseStats:
+def parse_all_notes(enex_file: Path, note_title_filter: str | None = None, note_index_filter: int | None = None) -> ParseStats:
     """Parse all notes from ENEX file in a single pass.
+
+    Args:
+        enex_file: Path to ENEX file
+        note_title_filter: If provided, only parse notes with exact matching title
+        note_index_filter: If provided, only parse note at this 1-based index
 
     Returns ParseStats with all results including raw XML for failed notes.
     This eliminates the need for separate count_notes() and iter_notes() calls.
     """
     stats = ParseStats()
+    note_index = 0  # Track current note index (1-based)
 
     for note_raw, raw_xml in iter_xml_elements_with_raw(enex_file, "note"):
-        stats.total += 1
-
+        note_index += 1
+        
+        # Apply index filter if specified
+        if note_index_filter is not None and note_index != note_index_filter:
+            continue
+        
         try:
             note = _process_note(note_raw)
+            
+            # Apply title filter if specified
+            if note_title_filter is not None and note.title != note_title_filter:
+                continue
+            
+            # Only count and add if it passed all filters
+            stats.total += 1
+            
             result = NoteParseResult(
                 note=note, raw_xml=raw_xml, error=None, parse_success=True
             )
             stats.successful += 1
+            stats.results.append(result)
         except Exception as e:
             logger.warning(f"Failed to parse note: {e}")
             logger.debug(f"Parse error details", exc_info=e)
+            
+            stats.total += 1
+            
             result = NoteParseResult(
                 note=None, raw_xml=raw_xml, error=e, parse_success=False
             )
             stats.failed += 1
+            stats.results.append(result)
 
-        stats.results.append(result)
-
+    # Log filtering results if applicable
+    if note_title_filter and stats.total == 0:
+        logger.warning(f"No notes found with title '{note_title_filter}' in ENEX file")
+    elif note_index_filter and stats.total == 0:
+        logger.warning(f"No note found at index {note_index_filter} in ENEX file")
+    
     logger.debug(
         f"Parsed {stats.total} notes: {stats.successful} successful, {stats.failed} failed"
     )
