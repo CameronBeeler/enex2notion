@@ -160,6 +160,8 @@ def convert_block_to_api_format(notion_block) -> dict[str, Any] | list[dict[str,
         "NotionQuoteBlock": _convert_quote,
         "NotionCalloutBlock": _convert_callout,
         "NotionImageBlock": _convert_image,
+        "NotionVideoBlock": _convert_video,
+        "NotionAudioBlock": _convert_audio,
         "NotionPDFBlock": _convert_pdf,
         "NotionFileBlock": _convert_file,
         "NotionTableBlock": _convert_table,
@@ -623,6 +625,64 @@ def _convert_pdf(notion_block) -> dict[str, Any]:
     return {
         "type": "pdf",
         "pdf": {
+            "type": "file_upload",
+            "file_upload": {
+                "id": file_upload_id
+            }
+        }
+    }
+
+
+def _convert_video(notion_block) -> dict[str, Any]:
+    """Convert video block.
+    
+    Uses file_upload type with the uploaded file ID.
+    If upload failed, creates a visible placeholder.
+    """
+    # Get file_upload ID from block attributes
+    file_upload_id = notion_block.attrs.get("file_upload_id")
+    upload_failed = notion_block.attrs.get("upload_failed", False)
+    
+    if not file_upload_id:
+        if upload_failed:
+            # Create a visible placeholder paragraph
+            filename = _get_resource_filename(notion_block)
+            return _create_failed_upload_placeholder(filename, "video")
+        logger.warning("Video block has no file_upload_id - skipping")
+        return None
+    
+    return {
+        "type": "video",
+        "video": {
+            "type": "file_upload",
+            "file_upload": {
+                "id": file_upload_id
+            }
+        }
+    }
+
+
+def _convert_audio(notion_block) -> dict[str, Any]:
+    """Convert audio block.
+    
+    Uses file_upload type with the uploaded file ID.
+    If upload failed, creates a visible placeholder.
+    """
+    # Get file_upload ID from block attributes
+    file_upload_id = notion_block.attrs.get("file_upload_id")
+    upload_failed = notion_block.attrs.get("upload_failed", False)
+    
+    if not file_upload_id:
+        if upload_failed:
+            # Create a visible placeholder paragraph
+            filename = _get_resource_filename(notion_block)
+            return _create_failed_upload_placeholder(filename, "audio")
+        logger.warning("Audio block has no file_upload_id - skipping")
+        return None
+    
+    return {
+        "type": "audio",
+        "audio": {
             "type": "file_upload",
             "file_upload": {
                 "id": file_upload_id

@@ -695,29 +695,50 @@ class NotionAPIWrapper:
     def upload_file(self, file_data: bytes, filename: str, mime_type: str) -> str:
         """Upload file to Notion using Direct Upload API.
 
-        Uses the official Notion File Upload API (3-step process):
-        1. Create file upload (get upload URL)
-        2. Send file contents
-        3. Complete upload
+        Automatically uses multi-part upload for files >= 20MB, single-part for smaller files.
+        Multi-part uploads split files into 20MB chunks, supporting files of any size.
+
+        Uses the official Notion File Upload API:
+        - Single-part (< 20MB): 2 steps (create + send)
+        - Multi-part (>= 20MB): 3 steps (create + send parts + complete)
 
         Args:
-            file_data: File binary data
+            file_data: File binary data (any size supported)
             filename: File name
-            mime_type: MIME type (e.g. 'image/png')
+            mime_type: MIME type (e.g. 'image/png', 'application/pdf')
 
         Returns:
             File upload ID (to be used with type: file_upload)
 
         Raises:
-            Exception: If upload fails or file is too large
+            Exception: If upload fails or file type is not supported by Notion
         """
-        # Check file size (Notion limit for single_part is 20MB)
-        file_size_mb = len(file_data) / (1024 * 1024)
-        if file_size_mb >= 20:
-            raise Exception(
-                f"File too large ({file_size_mb:.1f} MB). Notion's single_part upload limit is 20MB. "
-                f"File: {filename}"
-            )
+        file_size_bytes = len(file_data)
+        file_size_mb = file_size_bytes / (1024 * 1024)
+        
+        # Determine upload mode based on file size
+        # Use multi-part for files >= 20MB
+        CHUNK_SIZE = 20 * 1024 * 1024  # 20MB chunks
+        use_multipart = file_size_bytes >= CHUNK_SIZE
+        
+        if use_multipart:
+            logger.debug(f"Using multi-part upload for {filename} ({file_size_mb:.1f} MB)")
+            return self._upload_file_multipart(file_data, filename, mime_type)
+        else:
+            logger.debug(f"Using single-part upload for {filename} ({file_size_mb:.1f} MB)")
+            return self._upload_file_singlepart(file_data, filename, mime_type)
+    
+    def _upload_file_singlepart(self, file_data: bytes, filename: str, mime_type: str) -> str:
+        """Upload file using single-part mode (< 20MB).
+        
+        Args:
+            file_data: File binary data
+            filename: File name
+            mime_type: MIME type
+        
+        Returns:
+            File upload ID
+        """
         
         headers = {
             "Authorization": f"Bearer {self._auth_token}",
@@ -726,14 +747,14 @@ class NotionAPIWrapper:
         }
         
         # Step 1: Create file upload
-        logger.debug(f"Creating file upload for {filename} ({len(file_data)} bytes)")
+        logger.debug(f"Creating single-part file upload for {filename} ({len(file_data)} bytes)")
         time.sleep(self._rate_limit_delay)
         
         create_response = requests.post(
             "https://api.notion.com/v1/file_uploads",
             headers=headers,
             json={
-                "mode": "single_part",  # For files < 20MB
+                "mode": "single_part",
                 "filename": filename,
             },
             timeout=30,
@@ -748,25 +769,22 @@ class NotionAPIWrapper:
         
         create_data = create_response.json()
         upload_id = create_data["id"]
-        upload_url = create_data["upload_url"]
         logger.debug(f"  Upload ID: {upload_id}")
         
         # Step 2: Send file contents
-        # Use the /send endpoint which requires Authorization header
         logger.debug(f"Sending file contents")
         time.sleep(self._rate_limit_delay)
         
         send_headers = {
             "Authorization": f"Bearer {self._auth_token}",
             "Notion-Version": NOTION_API_VERSION,
-            # NOTE: Do NOT set Content-Type - let requests handle multipart/form-data
         }
         
         send_response = requests.post(
             f"https://api.notion.com/v1/file_uploads/{upload_id}/send",
             headers=send_headers,
             files={"file": (filename, file_data, mime_type)},
-            timeout=300,  # 5 minutes for large PDFs
+            timeout=300,  # 5 minutes
         )
         
         if send_response.status_code != 200:
@@ -776,12 +794,117 @@ class NotionAPIWrapper:
                 f"Failed to send file contents (HTTP {send_response.status_code}): {error_msg}"
             )
         
-        logger.debug(f"  File sent successfully, status: uploaded")
+        logger.debug(f"  File uploaded successfully")
+        return upload_id
+    
+    def _upload_file_multipart(self, file_data: bytes, filename: str, mime_type: str) -> str:
+        """Upload file using multi-part mode (>= 20MB).
         
-        # NOTE: For single_part mode, the file is automatically marked as "uploaded"
-        # after the send step. No need to call /complete endpoint.
-        # The complete endpoint is only used for multi_part uploads.
+        Splits file into 20MB chunks and uploads each part separately.
         
+        Args:
+            file_data: File binary data
+            filename: File name
+            mime_type: MIME type
+        
+        Returns:
+            File upload ID
+        """
+        CHUNK_SIZE = 20 * 1024 * 1024  # 20MB
+        file_size = len(file_data)
+        num_chunks = (file_size + CHUNK_SIZE - 1) // CHUNK_SIZE  # Ceiling division
+        
+        logger.debug(f"Multi-part upload: {file_size} bytes in {num_chunks} chunks")
+        
+        headers = {
+            "Authorization": f"Bearer {self._auth_token}",
+            "Content-Type": "application/json",
+            "Notion-Version": NOTION_API_VERSION,
+        }
+        
+        # Step 1: Create multi-part file upload
+        logger.debug(f"Creating multi-part file upload for {filename}")
+        time.sleep(self._rate_limit_delay)
+        
+        create_response = requests.post(
+            "https://api.notion.com/v1/file_uploads",
+            headers=headers,
+            json={
+                "mode": "multi_part",
+                "filename": filename,
+                "num_parts": num_chunks,
+            },
+            timeout=30,
+        )
+        
+        if create_response.status_code != 200:
+            error_data = create_response.json() if create_response.text else {}
+            error_msg = error_data.get("message", create_response.text)
+            raise Exception(
+                f"Failed to create multi-part upload (HTTP {create_response.status_code}): {error_msg}"
+            )
+        
+        create_data = create_response.json()
+        upload_id = create_data["id"]
+        part_urls = create_data.get("part_urls", [])
+        
+        if len(part_urls) != num_chunks:
+            raise Exception(
+                f"Expected {num_chunks} part URLs, got {len(part_urls)}"
+            )
+        
+        logger.debug(f"  Upload ID: {upload_id}, {num_chunks} parts")
+        
+        # Step 2: Upload each part
+        send_headers = {
+            "Authorization": f"Bearer {self._auth_token}",
+            "Notion-Version": NOTION_API_VERSION,
+        }
+        
+        for part_num in range(num_chunks):
+            start = part_num * CHUNK_SIZE
+            end = min(start + CHUNK_SIZE, file_size)
+            chunk_data = file_data[start:end]
+            
+            logger.debug(f"  Uploading part {part_num + 1}/{num_chunks} ({len(chunk_data)} bytes)")
+            time.sleep(self._rate_limit_delay)
+            
+            send_response = requests.post(
+                f"https://api.notion.com/v1/file_uploads/{upload_id}/send",
+                headers=send_headers,
+                json={"part_number": part_num},
+                files={"file": (filename, chunk_data, mime_type)},
+                timeout=300,
+            )
+            
+            if send_response.status_code != 200:
+                error_data = send_response.json() if send_response.text else {}
+                error_msg = error_data.get("message", send_response.text)
+                raise Exception(
+                    f"Failed to send part {part_num + 1} (HTTP {send_response.status_code}): {error_msg}"
+                )
+        
+        logger.debug(f"  All {num_chunks} parts uploaded")
+        
+        # Step 3: Complete the multi-part upload
+        logger.debug(f"Completing multi-part upload")
+        time.sleep(self._rate_limit_delay)
+        
+        complete_response = requests.post(
+            f"https://api.notion.com/v1/file_uploads/{upload_id}/complete",
+            headers=headers,
+            json={},  # Empty body required
+            timeout=30,
+        )
+        
+        if complete_response.status_code != 200:
+            error_data = complete_response.json() if complete_response.text else {}
+            error_msg = error_data.get("message", complete_response.text)
+            raise Exception(
+                f"Failed to complete upload (HTTP {complete_response.status_code}): {error_msg}"
+            )
+        
+        logger.debug(f"  Multi-part upload completed successfully")
         return upload_id
 
 

@@ -13,15 +13,9 @@ from enex2notion.parse_warnings import add_warning
 
 logger = logging.getLogger(__name__)
 
-# Known unsupported file extensions by Notion's File Upload API
-# This list is not exhaustive - Notion may reject other extensions
-UNSUPPORTED_EXTENSIONS = {
-    # Apple formats
-    ".pages", ".numbers", ".key",
-    # Executable formats (already banned by enex_parser for security)
-    ".exe", ".app", ".apk", ".jar", ".js",
-    # Add more as discovered
-}
+# NOTE: We now allow all file types to be uploaded.
+# Notion's API will handle any unsupported types and return appropriate errors.
+# The multi-part upload system supports files of any size and type.
 
 
 def upload_image_to_notion(resource, notion_api, rejected_tracker=None, notebook_name="", note_title="") -> Optional[str]:
@@ -48,7 +42,7 @@ def upload_image_to_notion(resource, notion_api, rejected_tracker=None, notebook
 
     # Get original filename from resource, or fall back to hash
     filename = getattr(resource, "file_name", None)
-    mime = getattr(resource, "mime", "image/png")
+    mime = getattr(resource, "mime", "application/octet-stream")
     
     if not filename:
         # Fall back to hash-based filename if original name not available
@@ -56,26 +50,7 @@ def upload_image_to_notion(resource, notion_api, rejected_tracker=None, notebook
         resource_hash = getattr(resource, "md5", getattr(resource, "hash", "unknown"))
         filename = f"{resource_hash}{file_ext}"
 
-    # Pre-flight check: Detect known unsupported extensions
     file_ext = os.path.splitext(filename)[1].lower()
-    if file_ext in UNSUPPORTED_EXTENSIONS:
-        reason = f"Unsupported extension '{file_ext}' - not accepted by Notion File Upload API"
-        add_warning(f"Attached file not uploaded: '{filename}' ({file_ext} format not supported by Notion)")
-        logger.warning(
-            f"Skipping {filename}: '{file_ext}' files are not supported by Notion's File Upload API. "
-            f"Consider converting to PDF, DOCX, or another supported format."
-        )
-        # Track rejected file
-        if rejected_tracker:
-            rejected_tracker.add_rejected_file(
-                notebook_name=notebook_name,
-                note_title=note_title,
-                filename=filename,
-                reason=reason,
-                file_extension=file_ext,
-            )
-        return None
-    
     logger.debug(f"Uploading {filename} ({len(data_bin)} bytes, {mime})")
 
     # Retry logic with exponential backoff for transient errors
@@ -115,13 +90,17 @@ def upload_image_to_notion(resource, notion_api, rejected_tracker=None, notebook
     # If we get here, all retries failed - handle the last exception
     if last_exception:
         error_msg = str(last_exception)
-        # Check if it's an unsupported extension error from Notion API
-        if "extension that is not supported" in error_msg:
-            reason = f"Rejected by Notion API: Extension '{file_ext}' not supported"
-            add_warning(f"Attached file not uploaded: '{filename}' (Notion rejected {file_ext} format)")
+        # Check if it's an unsupported extension/type error from Notion API
+        if "extension that is not supported" in error_msg or "not supported" in error_msg.lower():
+            reason = f"Notion API rejection: {error_msg[:150]}"
+            add_warning(
+                f"File not uploaded: '{filename}' - Notion does not support this file type. "
+                f"File will be stored as generic attachment."
+            )
             logger.warning(
-                f"Skipping {filename}: File extension '{file_ext}' not supported by Notion. "
-                f"Consider converting to a supported format."
+                f"Notion rejected {filename} ({file_ext}): {error_msg}. "
+                f"Note: File was attempted for upload but Notion's API may not preview this type in the UI. "
+                f"It will be stored as a downloadable attachment if supported."
             )
             # Track rejected file
             if rejected_tracker:
@@ -136,7 +115,7 @@ def upload_image_to_notion(resource, notion_api, rejected_tracker=None, notebook
             # Generic upload failure - add warning and track
             reason = f"Upload failed: {str(last_exception)[:100]}"
             add_warning(f"File upload failed: '{filename}' - {str(last_exception)[:80]}")
-            logger.error(f"Failed to upload image {filename}: {last_exception}")
+            logger.error(f"Failed to upload file {filename}: {last_exception}")
             if rejected_tracker:
                 rejected_tracker.add_rejected_file(
                     notebook_name=notebook_name,
