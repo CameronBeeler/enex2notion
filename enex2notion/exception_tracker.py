@@ -25,6 +25,27 @@ class ExceptionTracker:
         self._exceptions_page_id = None
         self._notebook_exception_pages = {}  # notebook_name -> page_id
         self._special_pages_cache = {}  # title -> page_id (cached after first lookup/create)
+        self._exceptions_database_id = None  # Database ID for user-actionable exceptions
+        self._exception_counter = {}  # Counter for generating unique titles
+    
+    def initialize_infrastructure(self):
+        """Pre-create Exceptions page and User Action Required database.
+        
+        Call this at the start of import/link resolution to ensure infrastructure
+        exists before any processing begins.
+        """
+        logger.info("Initializing exception tracking infrastructure...")
+        
+        # Create Exceptions page
+        exceptions_page_id = self.ensure_exceptions_page()
+        logger.info(f"✓ Exceptions page ready: {exceptions_page_id}")
+        
+        # Create User Action Required database
+        self._create_exceptions_database()
+        if self._exceptions_database_id:
+            logger.info(f"✓ User Action Required database ready: {self._exceptions_database_id}")
+        
+        logger.info("Exception tracking infrastructure initialized")
 
     def ensure_exceptions_page(self) -> str:
         """Get or create the main "Exceptions" page under root.
@@ -71,6 +92,134 @@ class ExceptionTracker:
         self.wrapper.append_blocks(block_id=self._exceptions_page_id, children=intro_blocks)
 
         return self._exceptions_page_id
+
+    def _create_exceptions_database(self):
+        """Create the user-actionable exceptions database under the Exceptions page.
+        
+        This database tracks items that require manual user intervention:
+        - Files that failed to upload (need manual upload from unsupported-files directory)
+        - Invalid URLs that need manual fixing
+        - Tables that were split and may need manual review/consolidation
+        """
+        if self._exceptions_database_id:
+            return
+        
+        # Search for existing database - search ALL databases, then filter by parent
+        exceptions_page_id = self._exceptions_page_id
+        databases = self.wrapper.search_pages("User Action Required", include_databases=True)
+        
+        # Look for any existing database with this name under the exceptions page
+        found_db_id = None
+        for db in databases:
+            if db.get("object") == "database":
+                parent = db.get("parent", {})
+                # Check if parent is the exceptions page
+                if parent.get("type") == "page_id" and parent.get("page_id") == exceptions_page_id:
+                    found_db_id = db["id"]
+                    # Verify it has the correct schema by checking for "Error Type" property
+                    try:
+                        db_schema = self.wrapper.get_database(found_db_id)
+                        properties = db_schema.get("properties", {})
+                        if "Error Type" in properties:
+                            self._exceptions_database_id = found_db_id
+                            logger.info(f"Found existing 'User Action Required' database: {self._exceptions_database_id}")
+                            return
+                        else:
+                            # Database exists but has wrong schema - delete and recreate
+                            logger.warning(f"Found database with wrong schema, deleting: {found_db_id}")
+                            self.wrapper.delete_block(found_db_id)
+                            break
+                    except Exception as e:
+                        logger.warning(f"Failed to check database schema: {e}")
+                        break
+        
+        # If we found databases with this name but under different parents, delete them
+        # to avoid confusion (this handles the multiple databases issue)
+        for db in databases:
+            if db.get("object") == "database":
+                parent = db.get("parent", {})
+                if parent.get("type") == "page_id" and parent.get("page_id") != exceptions_page_id:
+                    db_id = db["id"]
+                    logger.warning(f"Found 'User Action Required' database in wrong location ({db_id}), deleting...")
+                    try:
+                        self.wrapper.delete_block(db_id)
+                        logger.info(f"Deleted misplaced database: {db_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete misplaced database: {e}")
+        
+        # Create new database with schema
+        logger.info("Creating 'User Action Required' database...")
+        schema = {
+            "Title": {"title": {}},  # Descriptive title: <note-title>-<error-type>-<count>
+            "Import Source": {"rich_text": {}},  # Source ENEX filename
+            "Notion Source Page": {"rich_text": {}},  # Page title in Notion
+            "Resolved": {"checkbox": {}},  # User marks as resolved after fixing
+            "Error Type": {"select": {}},  # Use select instead of status (simpler, no options needed)
+            "Block Link": {"url": {}},  # Direct link to the block/page in Notion
+        }
+        
+        db = self.wrapper.create_database(
+            parent_id=exceptions_page_id,
+            title="User Action Required",
+            properties_schema=schema
+        )
+        self._exceptions_database_id = db["id"]
+        logger.info(f"Created 'User Action Required' database: {self._exceptions_database_id}")
+    
+    def add_exception_to_database(
+        self,
+        notebook_name: str,
+        note_title: str,
+        page_id: str,
+        error_type: str,
+        error_detail: str = ""
+    ):
+        """Add a user-actionable exception entry to the database.
+        
+        Args:
+            notebook_name: Name of the source ENEX file (e.g., "Decisions.enex")
+            note_title: Title of the note in Notion
+            page_id: Page ID of the note in Notion
+            error_type: Type of error - must be one of: "File Upload Failed", "Invalid URL", "Table Split"
+            error_detail: Additional details (e.g., filename, URL, etc.)
+        """
+        # Ensure database exists
+        self.ensure_exceptions_page()
+        if not self._exceptions_database_id:
+            self._create_exceptions_database()
+        
+        # Generate unique title
+        counter_key = f"{notebook_name}-{note_title}-{error_type}"
+        count = self._exception_counter.get(counter_key, 0) + 1
+        self._exception_counter[counter_key] = count
+        
+        # Format title: <note-title>-<error-type>-<count>
+        # Truncate note title to keep total length reasonable
+        safe_note_title = note_title[:80] if note_title else "Untitled"
+        title_text = f"{safe_note_title}-{error_type.replace(' ', '')}-{count}"
+        
+        # Create block link (direct link to page)
+        block_link = f"https://notion.so/{page_id.replace('-', '')}"
+        
+        # Create database entry
+        properties = {
+            "Title": {"title": [{"type": "text", "text": {"content": title_text}}]},
+            "Import Source": {"rich_text": [{"type": "text", "text": {"content": notebook_name}}]},
+            "Notion Source Page": {"rich_text": [{"type": "text", "text": {"content": note_title}}]},
+            "Resolved": {"checkbox": False},
+            "Error Type": {"select": {"name": error_type}},
+            "Block Link": {"url": block_link},
+        }
+        
+        try:
+            self.wrapper.create_page(
+                parent_id=self._exceptions_database_id,
+                title=title_text,
+                properties=properties
+            )
+            logger.debug(f"Added exception to database: {title_text} ({error_detail})")
+        except Exception as e:
+            logger.warning(f"Failed to add exception to database: {e}")
 
     def ensure_notebook_exception_page(self, notebook_name: str) -> str:
         """Get or create exception page for a specific notebook.

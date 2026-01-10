@@ -25,7 +25,8 @@ def upload_image_to_notion(
     rejected_tracker=None, 
     notebook_name="", 
     note_title="",
-    unsupported_dir: Optional[Path] = None
+    unsupported_dir: Optional[Path] = None,
+    failed_uploads_list: Optional[list] = None
 ) -> Optional[str]:
     """Upload image resource to Notion using Direct Upload API.
 
@@ -36,6 +37,7 @@ def upload_image_to_notion(
         notebook_name: Name of notebook for tracking rejected files
         note_title: Title of note for tracking rejected files
         unsupported_dir: Directory to save unsupported files (optional)
+        failed_uploads_list: List to append failed upload info (filename, saved_path)
 
     Returns:
         File upload ID string (to be used with type: file_upload), or None if failed
@@ -81,9 +83,15 @@ def upload_image_to_notion(
             is_last_attempt = (attempt == max_retries - 1)
             error_msg = str(e)
             
-            # Check if Notion rejected the file extension - don't retry, save to disk instead
-            if "extension that is not supported" in error_msg:
-                logger.info(f"Notion doesn't support {filename} extension - will save to disk")
+            # Check if Notion rejected the file for any reason - don't retry, save to disk instead
+            # Includes: unsupported extension, MIME mismatch, multipart upload failures, etc.
+            if any(phrase in error_msg.lower() for phrase in [
+                "extension that is not supported",
+                "content type",
+                "expected", # Catches "Expected 2 part URLs, got 0" type errors
+                "part url"
+            ]):
+                # Don't log here - will log with full path after saving
                 break
             
             # Check if it's a transient error worth retrying
@@ -105,8 +113,15 @@ def upload_image_to_notion(
     # If we get here, all retries failed - handle the last exception
     if last_exception:
         error_msg = str(last_exception)
-        # Check if it's an unsupported extension/type error from Notion API
-        if "extension that is not supported" in error_msg or "not supported" in error_msg.lower():
+        # Check if it's any file upload failure that should result in saving to disk
+        # This includes: unsupported types, MIME mismatches, API failures, etc.
+        if any(phrase in error_msg.lower() for phrase in [
+            "extension that is not supported",
+            "not supported",
+            "content type",
+            "expected",  # Multipart upload failures
+            "part url"
+        ]):
             # Don't treat as warning/error - save to disk with original filename
             # Save file to disk with original filename (not modified)
             if unsupported_dir:
@@ -117,15 +132,14 @@ def upload_image_to_notion(
                     note_title=note_title,
                     unsupported_dir=unsupported_dir,
                 )
-                # Store the download location for the placeholder block
-                if saved_path and hasattr(resource, 'attrs'):
-                    resource.attrs = getattr(resource, 'attrs', {})
-                    resource.attrs['download_location'] = str(saved_path)
-                    # Log with file location immediately after saving
-                    logger.info(
-                        f"File {filename} cannot be uploaded to Notion (unsupported type). "
-                        f"Saved to: {saved_path}"
-                    )
+                # Log with file location (INFO - not an error condition)
+                if saved_path:
+                    logger.info(f"Saved {filename} to unsupported-files directory: {saved_path}")
+                    # Track for later addition to exceptions database
+                    if failed_uploads_list is not None:
+                        failed_uploads_list.append({"filename": filename, "path": str(saved_path)})
+                else:
+                    logger.info(f"Saved {filename} to unsupported-files directory (path unavailable)")
             
             # Note: Don't track in rejected_tracker - unsupported files are handled separately
         else:
@@ -136,13 +150,16 @@ def upload_image_to_notion(
             
             # Save file to disk if directory provided
             if unsupported_dir:
-                _save_unsupported_file(
+                saved_path = _save_unsupported_file(
                     data_bin=data_bin,
                     filename=filename,
                     notebook_name=notebook_name,
                     note_title=note_title,
                     unsupported_dir=unsupported_dir,
                 )
+                # Track for later addition to exceptions database
+                if saved_path and failed_uploads_list is not None:
+                    failed_uploads_list.append({"filename": filename, "path": str(saved_path)})
             
             if rejected_tracker:
                 rejected_tracker.add_rejected_file(

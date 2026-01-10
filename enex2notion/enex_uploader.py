@@ -84,7 +84,7 @@ def _collect_uploadable_blocks(blocks, uploadable_list):
             _collect_uploadable_blocks(block.children, uploadable_list)
 
 
-def _upload_single_file(block, notion_api, rejected_tracker, notebook_name, note_title, unsupported_dir):
+def _upload_single_file(block, notion_api, rejected_tracker, notebook_name, note_title, unsupported_dir, failed_uploads_list):
     """Upload a single file block to Notion.
     
     Args:
@@ -94,6 +94,7 @@ def _upload_single_file(block, notion_api, rejected_tracker, notebook_name, note
         notebook_name: Name of notebook for tracking
         note_title: Title of note for tracking
         unsupported_dir: Directory to save unsupported files (optional)
+        failed_uploads_list: List to collect failed upload info
         
     Returns:
         Tuple of (block, upload_id, warnings) where upload_id is None if failed,
@@ -105,7 +106,7 @@ def _upload_single_file(block, notion_api, rejected_tracker, notebook_name, note
     init_warnings()
     
     upload_id = upload_image_to_notion(
-        block.resource, notion_api, rejected_tracker, notebook_name, note_title, unsupported_dir
+        block.resource, notion_api, rejected_tracker, notebook_name, note_title, unsupported_dir, failed_uploads_list
     )
     
     # Collect warnings from this thread
@@ -114,7 +115,7 @@ def _upload_single_file(block, notion_api, rejected_tracker, notebook_name, note
     return (block, upload_id, warnings)
 
 
-def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_name="", note_title="", unsupported_dir=None):
+def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_name="", note_title="", unsupported_dir=None, failed_uploads_list=None):
     """Process uploadable blocks: upload to Notion concurrently and set file_upload IDs.
     
     Handles images, PDFs, and generic files with concurrent uploads (max 3 workers
@@ -130,6 +131,7 @@ def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_na
         notebook_name: Name of notebook for tracking rejected files
         note_title: Title of note for tracking rejected files
         unsupported_dir: Directory to save unsupported files (optional)
+        failed_uploads_list: List to collect failed upload info (filename, path)
     """
     from enex2notion.parse_warnings import add_warning
     
@@ -149,7 +151,7 @@ def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_na
         # Submit all upload tasks
         future_to_block = {
             executor.submit(
-                _upload_single_file, block, notion_api, rejected_tracker, notebook_name, note_title, unsupported_dir
+                _upload_single_file, block, notion_api, rejected_tracker, notebook_name, note_title, unsupported_dir, failed_uploads_list
             ): block
             for block in uploadable_blocks
         }
@@ -174,17 +176,21 @@ def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_na
                     # Mark block as failed so we can add a placeholder
                     block.attrs["upload_failed"] = True
                     block_type = block.__class__.__name__
-                    # Check if this is an unsupported file (has download_location) vs actual error
-                    if hasattr(block, 'resource') and hasattr(block.resource, 'attrs'):
-                        download_loc = block.resource.attrs.get('download_location')
-                        if download_loc:
-                            # Unsupported file - already logged at INFO level with path
-                            logger.debug(f"{block_type} saved to disk (unsupported type)")
-                        else:
-                            # Actual upload failure
-                            logger.warning(f"Failed to upload {block_type}")
-                    else:
-                        # Fallback: treat as failure
+                    # Check if this file was saved to disk (appears in failed_uploads_list)
+                    # If file is in failed_uploads_list, it was successfully saved to disk
+                    was_saved_to_disk = False
+                    if failed_uploads_list and hasattr(block, 'resource') and block.resource:
+                        # Check if this resource's file appears in failed_uploads by filename
+                        resource_filename = getattr(block.resource, 'file_name', None)
+                        if resource_filename:
+                            for failed_file in failed_uploads_list:
+                                if failed_file.get('filename') == resource_filename:
+                                    was_saved_to_disk = True
+                                    logger.debug(f"{block_type} saved to disk: {failed_file.get('path')}")
+                                    break
+                    
+                    if not was_saved_to_disk:
+                        # Actual upload failure - this is unexpected
                         logger.warning(f"Failed to upload {block_type}")
             except Exception as e:
                 logger.error(f"File upload failed with exception: {e}")
@@ -245,7 +251,8 @@ def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_d
     page_id = new_page["id"]
 
     # Process uploadable blocks (images, PDFs, files): upload to Notion and set file_upload IDs
-    file_upload_warnings = _process_image_blocks(note_blocks, wrapper, rejected_tracker, notebook_name, note.title, unsupported_dir)
+    failed_uploads = []  # Track failed uploads for database entry
+    file_upload_warnings = _process_image_blocks(note_blocks, wrapper, rejected_tracker, notebook_name, note.title, unsupported_dir, failed_uploads)
     
     # Merge file upload warnings with errors
     if file_upload_warnings:
@@ -359,4 +366,4 @@ def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_d
     else:
         logger.debug(f"Successfully uploaded note '{note.title}' with {len(api_blocks)} blocks")
     
-    return (page_id, has_errors, errors)
+    return (page_id, has_errors, errors, failed_uploads)

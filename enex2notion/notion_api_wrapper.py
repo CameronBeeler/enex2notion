@@ -84,11 +84,17 @@ class NotionAPIWrapper:
         self.client = Client(auth=auth_token, timeout_ms=600000)  # 10 minutes
         self._auth_token = auth_token  # Store for raw API calls
         self._rate_limit_delay = 0.35  # ~3 requests/second
-        self._max_retries = 5  # Maximum retry attempts for rate limit errors
-        self._base_backoff = 1.0  # Base backoff time in seconds
+        self._max_retries = 6  # Maximum retry attempts for rate limit errors
+        self._max_wait_time = 1500  # 25 minutes in seconds
 
     def _retry_on_rate_limit(self, func, *args, **kwargs):
-        """Retry a function with exponential backoff on rate limit errors.
+        """Retry a function with exponential backoff ONLY on rate limit errors (429).
+        
+        Uses progressive backoff: 1s, 2s, 4s, then 5min intervals.
+        Gives up after 25 minutes total wait time.
+        
+        Other errors (timeouts, connection issues, 500s, etc.) are raised immediately
+        and should be handled by the caller if retry is desired.
         
         Args:
             func: Function to call
@@ -100,24 +106,55 @@ class NotionAPIWrapper:
         Raises:
             APIResponseError: If all retries exhausted or non-rate-limit error
         """
+        total_wait_time = 0
+        
         for attempt in range(self._max_retries):
             try:
-                return func(*args, **kwargs)
+                result = func(*args, **kwargs)
+                # Log success if we had previous rate limit failures
+                if attempt > 0:
+                    logger.info("✓ Retry successful after rate limit")
+                return result
             except APIResponseError as e:
                 error_msg = str(e).lower()
+                # ONLY retry on rate limit errors (429)
                 is_rate_limit = "rate limit" in error_msg or "429" in error_msg
                 
-                if not is_rate_limit or attempt == self._max_retries - 1:
-                    # Not a rate limit error, or last attempt - raise it
+                if not is_rate_limit:
+                    # Not a rate limit error - raise immediately for caller to handle
                     raise
                 
-                # Exponential backoff: 1s, 2s, 4s, 8s, 16s
-                wait_time = self._base_backoff * (2 ** attempt)
+                # Calculate wait time: 1s, 2s, 4s, then 5min, 5min, 5min
+                if attempt < 3:
+                    wait_time = 2 ** attempt  # 1s, 2s, 4s
+                else:
+                    wait_time = 300  # 5 minutes
+                
+                # Check if we would exceed max wait time
+                if total_wait_time + wait_time > self._max_wait_time:
+                    logger.error(
+                        f"Rate limiting has persisted for {total_wait_time / 60:.1f} minutes. "
+                        f"Exceeded maximum wait time of {self._max_wait_time / 60:.0f} minutes. "
+                        "Please restart the import later when rate limits have reset."
+                    )
+                    raise
+                
+                # Last attempt check
+                if attempt == self._max_retries - 1:
+                    logger.error(
+                        f"Rate limiting persisted after {self._max_retries} retry attempts. "
+                        "Please restart the import later when rate limits have reset."
+                    )
+                    raise
+                
+                # Log warning and wait
+                wait_min = wait_time / 60
                 logger.warning(
-                    f"Rate limited (attempt {attempt + 1}/{self._max_retries}), "
-                    f"waiting {wait_time:.1f}s before retry..."
+                    f"Rate limited by Notion API (attempt {attempt + 1}/{self._max_retries}). "
+                    f"Waiting {wait_min:.1f} minute{'s' if wait_min != 1 else ''} before retry..."
                 )
                 time.sleep(wait_time)
+                total_wait_time += wait_time
         
         # Should never reach here, but just in case
         raise APIResponseError(429, "Max retries exhausted", {})
@@ -265,7 +302,9 @@ class NotionAPIWrapper:
             )
             if response.status_code != 200:
                 error_data = response.json() if response.text else {}
-                raise APIResponseError(response.status_code, error_data.get("message", response.text), error_data)
+                error_msg = error_data.get("message", response.text)
+                # Raise as a generic Exception since APIResponseError expects a response object
+                raise Exception(f"Database creation failed (HTTP {response.status_code}): {error_msg}")
             return response
         
         response = self._retry_on_rate_limit(_create_db_request)
@@ -303,7 +342,13 @@ class NotionAPIWrapper:
                 created_blocks.extend(response.get("results", []))
                 logger.debug(f"Appended {len(batch)} blocks to {block_id}")
             except APIResponseError as e:
-                logger.error(f"Failed to append blocks: {e}")
+                # Rate limit errors are already handled in _retry_on_rate_limit
+                # Log as warning for non-rate-limit errors
+                error_msg = str(e).lower()
+                if "rate limit" in error_msg or "429" in error_msg:
+                    logger.warning(f"Failed to append blocks after rate limit retries: {e}")
+                else:
+                    logger.error(f"Failed to append blocks: {e}")
                 raise
 
         return created_blocks
@@ -612,11 +657,8 @@ class NotionAPIWrapper:
                 )
                 if response.status_code != 200:
                     error_data = response.json() if response.text else {}
-                    raise APIResponseError(
-                        response.status_code,
-                        error_data.get('message', response.text),
-                        error_data
-                    )
+                    error_msg = error_data.get('message', response.text)
+                    raise Exception(f"Database query failed (HTTP {response.status_code}): {error_msg}")
                 return response
             
             try:
@@ -817,11 +859,7 @@ class NotionAPIWrapper:
             if response.status_code != 200:
                 error_data = response.json() if response.text else {}
                 error_msg = error_data.get("message", response.text)
-                raise APIResponseError(
-                    response.status_code,
-                    f"Failed to create file upload: {error_msg}",
-                    error_data
-                )
+                raise Exception(f"Failed to create file upload (HTTP {response.status_code}): {error_msg}")
             return response
         
         create_response = self._retry_on_rate_limit(_create_upload)
@@ -906,11 +944,7 @@ class NotionAPIWrapper:
             if response.status_code != 200:
                 error_data = response.json() if response.text else {}
                 error_msg = error_data.get("message", response.text)
-                raise APIResponseError(
-                    response.status_code,
-                    f"Failed to create multi-part upload: {error_msg}",
-                    error_data
-                )
+                raise Exception(f"Failed to create multi-part upload (HTTP {response.status_code}): {error_msg}")
             return response
         
         create_response = self._retry_on_rate_limit(_create_multipart)
@@ -978,11 +1012,7 @@ class NotionAPIWrapper:
             if response.status_code != 200:
                 error_data = response.json() if response.text else {}
                 error_msg = error_data.get("message", response.text)
-                raise APIResponseError(
-                    response.status_code,
-                    f"Failed to complete upload: {error_msg}",
-                    error_data
-                )
+                raise Exception(f"Failed to complete upload (HTTP {response.status_code}): {error_msg}")
             return response
         
         complete_response = self._retry_on_rate_limit(_complete_multipart)

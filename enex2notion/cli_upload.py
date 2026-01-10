@@ -27,6 +27,9 @@ class DoneFile(object):
         self.done_hashes = set()
         self.databases = {}  # notebook_name -> database_id
 
+        # Ensure the parent directory exists
+        path.parent.mkdir(parents=True, exist_ok=True)
+
         try:
             with open(path, "r") as f:
                 for line in f:
@@ -50,6 +53,8 @@ class DoneFile(object):
         """Add a successfully uploaded note hash."""
         self.done_hashes.add(note_hash)
 
+        # Ensure parent directory exists
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "a") as f:
             f.write(f"{note_hash}\n")
     
@@ -65,6 +70,8 @@ class DoneFile(object):
         """Record a database creation for a notebook."""
         self.databases[notebook_name] = database_id
         
+        # Ensure parent directory exists
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.path, "a") as f:
             f.write(f"DB:{notebook_name}:{database_id}\n")
 
@@ -196,7 +203,7 @@ class EnexUploader(object):
         logger.info(f"Uploading note {note_idx}/{total_notes}: '{note.title}'")
 
         try:
-            page_id, has_errors, updated_errors = self._upload_note(self.notebook_root, note, note_blocks, errors, notebook_name)
+            page_id, has_errors, updated_errors, failed_uploads = self._upload_note(self.notebook_root, note, note_blocks, errors, notebook_name)
             self.done_hashes.add(note.note_hash)
             
             # Track partial import in exception summary page (use updated errors with warnings)
@@ -207,6 +214,39 @@ class EnexUploader(object):
                     page_id=page_id,
                     errors=updated_errors
                 )
+            
+            # Add failed file uploads to exceptions database
+            if failed_uploads and self.exception_tracker:
+                for failed_file in failed_uploads:
+                    self.exception_tracker.add_exception_to_database(
+                        notebook_name=notebook_name,
+                        note_title=note.title,
+                        page_id=page_id,
+                        error_type="File Upload Failed",
+                        error_detail=f"{failed_file['filename']} saved to {failed_file['path']}"
+                    )
+            
+            # Add other user-actionable warnings to database
+            if updated_errors and self.exception_tracker:
+                for error in updated_errors:
+                    # Check for missing image URL warning
+                    if "Image embed missing source URL" in error:
+                        self.exception_tracker.add_exception_to_database(
+                            notebook_name=notebook_name,
+                            note_title=note.title,
+                            page_id=page_id,
+                            error_type="Invalid URL",
+                            error_detail="Image embed missing source URL"
+                        )
+                    # Check for invalid URL warnings (broken links)
+                    elif "Invalid bookmark URL" in error or "Invalid URL marked with broken-link icon" in error:
+                        self.exception_tracker.add_exception_to_database(
+                            notebook_name=notebook_name,
+                            note_title=note.title,
+                            page_id=page_id,
+                            error_type="Invalid URL",
+                            error_detail=error[:100]  # Truncate to first 100 chars
+                        )
             
             return "success", None
         except NoteUploadFailException as e:
