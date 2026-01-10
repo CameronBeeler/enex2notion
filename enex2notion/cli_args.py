@@ -149,6 +149,11 @@ def parse_args(argv):
             "metavar": "FILE",
             "help": "save rejected/unsupported files report to CSV file",
         },
+        "--unsupported-files": {
+            "type": Path,
+            "metavar": "DIR",
+            "help": "directory to save files that Notion API rejects (organized by notebook/note)",
+        },
         "--note": {
             "help": "import only a specific note by exact title from ENEX file(s)",
             "metavar": "TITLE",

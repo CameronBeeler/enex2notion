@@ -71,7 +71,7 @@ class DoneFile(object):
 
 class EnexUploader(object):
     def __init__(
-        self, wrapper, root_id, mode: str, done_file: Path | None, rules: Rules, rejected_tracker=None
+        self, wrapper, root_id, mode: str, done_file: Path | None, rules: Rules, rejected_tracker=None, unsupported_dir: Path | None = None
     ):
         self.wrapper = wrapper  # NotionAPIWrapper instance
         self.root_id = root_id  # Root page ID string
@@ -81,6 +81,7 @@ class EnexUploader(object):
 
         self.done_hashes = DoneFile(done_file) if done_file else set()
         self.rejected_tracker = rejected_tracker
+        self.unsupported_dir = unsupported_dir
         
         # Initialize exception tracker for partial imports
         self.exception_tracker = ExceptionTracker(wrapper, root_id) if wrapper else None
@@ -262,6 +263,7 @@ class EnexUploader(object):
             database_schema=self.notebook_schema,
             rejected_tracker=self.rejected_tracker,
             notebook_name=notebook_name,
+            unsupported_dir=self.unsupported_dir,
         )
 
     def _attempt_upload(self, upload_func, error_message, *args, **kwargs):

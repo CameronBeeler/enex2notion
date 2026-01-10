@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 PROGRESS_BAR_WIDTH = 80
 
 
-def upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_database=False, database_schema=None, rejected_tracker=None, notebook_name=""):
+def upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_database=False, database_schema=None, rejected_tracker=None, notebook_name="", unsupported_dir=None):
     """Upload note to Notion using official API.
 
     Args:
@@ -31,6 +31,7 @@ def upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_da
         database_schema: Database schema dict for adapting properties
         rejected_tracker: RejectedFilesTracker instance (optional)
         notebook_name: Name of notebook for tracking rejected files
+        unsupported_dir: Directory to save unsupported files (optional)
     
     Returns:
         Tuple of (page_id, had_errors, errors) where:
@@ -39,7 +40,7 @@ def upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_da
         - errors: Updated list of all errors/warnings
     """
     try:
-        return _upload_note(wrapper, root_id, note, note_blocks, errors, is_database, database_schema, rejected_tracker, notebook_name)
+        return _upload_note(wrapper, root_id, note, note_blocks, errors, is_database, database_schema, rejected_tracker, notebook_name, unsupported_dir)
     except Exception as e:
         error_msg = str(e).lower()
         if "is not a property that exists" in error_msg:
@@ -83,7 +84,7 @@ def _collect_uploadable_blocks(blocks, uploadable_list):
             _collect_uploadable_blocks(block.children, uploadable_list)
 
 
-def _upload_single_file(block, notion_api, rejected_tracker, notebook_name, note_title):
+def _upload_single_file(block, notion_api, rejected_tracker, notebook_name, note_title, unsupported_dir):
     """Upload a single file block to Notion.
     
     Args:
@@ -92,6 +93,7 @@ def _upload_single_file(block, notion_api, rejected_tracker, notebook_name, note
         rejected_tracker: RejectedFilesTracker instance (optional)
         notebook_name: Name of notebook for tracking
         note_title: Title of note for tracking
+        unsupported_dir: Directory to save unsupported files (optional)
         
     Returns:
         Tuple of (block, upload_id, warnings) where upload_id is None if failed,
@@ -103,7 +105,7 @@ def _upload_single_file(block, notion_api, rejected_tracker, notebook_name, note
     init_warnings()
     
     upload_id = upload_image_to_notion(
-        block.resource, notion_api, rejected_tracker, notebook_name, note_title
+        block.resource, notion_api, rejected_tracker, notebook_name, note_title, unsupported_dir
     )
     
     # Collect warnings from this thread
@@ -112,7 +114,7 @@ def _upload_single_file(block, notion_api, rejected_tracker, notebook_name, note
     return (block, upload_id, warnings)
 
 
-def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_name="", note_title=""):
+def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_name="", note_title="", unsupported_dir=None):
     """Process uploadable blocks: upload to Notion concurrently and set file_upload IDs.
     
     Handles images, PDFs, and generic files with concurrent uploads (max 3 workers
@@ -127,6 +129,7 @@ def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_na
         rejected_tracker: RejectedFilesTracker instance (optional)
         notebook_name: Name of notebook for tracking rejected files
         note_title: Title of note for tracking rejected files
+        unsupported_dir: Directory to save unsupported files (optional)
     """
     from enex2notion.parse_warnings import add_warning
     
@@ -146,7 +149,7 @@ def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_na
         # Submit all upload tasks
         future_to_block = {
             executor.submit(
-                _upload_single_file, block, notion_api, rejected_tracker, notebook_name, note_title
+                _upload_single_file, block, notion_api, rejected_tracker, notebook_name, note_title, unsupported_dir
             ): block
             for block in uploadable_blocks
         }
@@ -171,14 +174,25 @@ def _process_image_blocks(blocks, notion_api, rejected_tracker=None, notebook_na
                     # Mark block as failed so we can add a placeholder
                     block.attrs["upload_failed"] = True
                     block_type = block.__class__.__name__
-                    logger.warning(f"Failed to upload {block_type}")
+                    # Check if this is an unsupported file (has download_location) vs actual error
+                    if hasattr(block, 'resource') and hasattr(block.resource, 'attrs'):
+                        download_loc = block.resource.attrs.get('download_location')
+                        if download_loc:
+                            # Unsupported file - already logged at INFO level with path
+                            logger.debug(f"{block_type} saved to disk (unsupported type)")
+                        else:
+                            # Actual upload failure
+                            logger.warning(f"Failed to upload {block_type}")
+                    else:
+                        # Fallback: treat as failure
+                        logger.warning(f"Failed to upload {block_type}")
             except Exception as e:
                 logger.error(f"File upload failed with exception: {e}")
     
     return all_warnings
 
 
-def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_database, database_schema, rejected_tracker, notebook_name):
+def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_database, database_schema, rejected_tracker, notebook_name, unsupported_dir=None):
     """Internal: Upload note with partial import support.
     
     Note: Failed pages are always kept (marked as partial imports) - no deletion on error.
@@ -231,7 +245,7 @@ def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_d
     page_id = new_page["id"]
 
     # Process uploadable blocks (images, PDFs, files): upload to Notion and set file_upload IDs
-    file_upload_warnings = _process_image_blocks(note_blocks, wrapper, rejected_tracker, notebook_name, note.title)
+    file_upload_warnings = _process_image_blocks(note_blocks, wrapper, rejected_tracker, notebook_name, note.title, unsupported_dir)
     
     # Merge file upload warnings with errors
     if file_upload_warnings:

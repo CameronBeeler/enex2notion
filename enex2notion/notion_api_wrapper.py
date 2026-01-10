@@ -84,6 +84,43 @@ class NotionAPIWrapper:
         self.client = Client(auth=auth_token, timeout_ms=600000)  # 10 minutes
         self._auth_token = auth_token  # Store for raw API calls
         self._rate_limit_delay = 0.35  # ~3 requests/second
+        self._max_retries = 5  # Maximum retry attempts for rate limit errors
+        self._base_backoff = 1.0  # Base backoff time in seconds
+
+    def _retry_on_rate_limit(self, func, *args, **kwargs):
+        """Retry a function with exponential backoff on rate limit errors.
+        
+        Args:
+            func: Function to call
+            *args, **kwargs: Arguments to pass to function
+            
+        Returns:
+            Function result
+            
+        Raises:
+            APIResponseError: If all retries exhausted or non-rate-limit error
+        """
+        for attempt in range(self._max_retries):
+            try:
+                return func(*args, **kwargs)
+            except APIResponseError as e:
+                error_msg = str(e).lower()
+                is_rate_limit = "rate limit" in error_msg or "429" in error_msg
+                
+                if not is_rate_limit or attempt == self._max_retries - 1:
+                    # Not a rate limit error, or last attempt - raise it
+                    raise
+                
+                # Exponential backoff: 1s, 2s, 4s, 8s, 16s
+                wait_time = self._base_backoff * (2 ** attempt)
+                logger.warning(
+                    f"Rate limited (attempt {attempt + 1}/{self._max_retries}), "
+                    f"waiting {wait_time:.1f}s before retry..."
+                )
+                time.sleep(wait_time)
+        
+        # Should never reach here, but just in case
+        raise APIResponseError(429, "Max retries exhausted", {})
 
     def search_pages(self, title: str, include_databases: bool = False) -> list[dict[str, Any]]:
         """Search for pages and optionally databases by title.
@@ -98,7 +135,7 @@ class NotionAPIWrapper:
         try:
             # Search without filter to get both pages and databases
             logger.debug(f"Searching for '{title}' (include_databases={include_databases})")
-            response = self.client.search(query=title)
+            response = self._retry_on_rate_limit(self.client.search, query=title)
             results = response.get("results", [])
             logger.debug(f"  Raw search returned {len(results)} results")
             
@@ -180,7 +217,7 @@ class NotionAPIWrapper:
             }
 
         time.sleep(self._rate_limit_delay)
-        return self.client.pages.create(**page_data)
+        return self._retry_on_rate_limit(self.client.pages.create, **page_data)
 
     def create_database(
         self, parent_id: str | None, title: str, properties_schema: dict[str, Any]
@@ -219,16 +256,19 @@ class NotionAPIWrapper:
             "Notion-Version": NOTION_API_VERSION,
         }
         
-        response = requests.post(
-            "https://api.notion.com/v1/databases",
-            headers=headers,
-            json=database_data,
-            timeout=30,
-        )
+        def _create_db_request():
+            response = requests.post(
+                "https://api.notion.com/v1/databases",
+                headers=headers,
+                json=database_data,
+                timeout=30,
+            )
+            if response.status_code != 200:
+                error_data = response.json() if response.text else {}
+                raise APIResponseError(response.status_code, error_data.get("message", response.text), error_data)
+            return response
         
-        if response.status_code != 200:
-            error_data = response.json() if response.text else {}
-            raise APIResponseError(response.status_code, error_data.get("message", response.text), error_data)
+        response = self._retry_on_rate_limit(_create_db_request)
         
         result = response.json()
         logger.debug(f"Database created successfully with ID: {result.get('id')}")
@@ -257,7 +297,9 @@ class NotionAPIWrapper:
             time.sleep(self._rate_limit_delay)
 
             try:
-                response = self.client.blocks.children.append(block_id=block_id, children=batch)
+                response = self._retry_on_rate_limit(
+                    self.client.blocks.children.append, block_id=block_id, children=batch
+                )
                 created_blocks.extend(response.get("results", []))
                 logger.debug(f"Appended {len(batch)} blocks to {block_id}")
             except APIResponseError as e:
@@ -276,7 +318,7 @@ class NotionAPIWrapper:
             Block object
         """
         time.sleep(self._rate_limit_delay)
-        return self.client.blocks.retrieve(block_id=block_id)
+        return self._retry_on_rate_limit(self.client.blocks.retrieve, block_id=block_id)
 
     def get_database(self, database_id: str) -> dict[str, Any]:
         """Retrieve a database and its schema.
@@ -288,7 +330,7 @@ class NotionAPIWrapper:
             Database object with properties schema
         """
         time.sleep(self._rate_limit_delay)
-        return self.client.databases.retrieve(database_id=database_id)
+        return self._retry_on_rate_limit(self.client.databases.retrieve, database_id=database_id)
 
     def get_blocks(self, block_id: str, page_size: int = 100) -> list[dict[str, Any]]:
         """Retrieve all blocks from a page/block with pagination.
@@ -312,7 +354,7 @@ class NotionAPIWrapper:
 
             try:
                 # Wrap API call with retry logic
-                response = _retry_on_transient_errors(lambda: self.client.blocks.children.list(**params))
+                response = self._retry_on_rate_limit(self.client.blocks.children.list, **params)
                 blocks = response.get("results", [])
                 all_blocks.extend(blocks)
 
@@ -361,7 +403,7 @@ class NotionAPIWrapper:
         time.sleep(self._rate_limit_delay)
 
         try:
-            return _retry_on_transient_errors(lambda: self.client.blocks.update(block_id=block_id, **block_data))
+            return self._retry_on_rate_limit(self.client.blocks.update, block_id=block_id, **block_data)
         except APIResponseError as e:
             logger.error(f"Failed to update block {block_id}: {e}")
             raise
@@ -370,7 +412,7 @@ class NotionAPIWrapper:
         """Archive (delete) a block or page by ID."""
         time.sleep(self._rate_limit_delay)
         try:
-            return self.client.blocks.delete(block_id=block_id)
+            return self._retry_on_rate_limit(self.client.blocks.delete, block_id=block_id)
         except APIResponseError as e:
             logger.error(f"Failed to delete block {block_id}: {e}")
             raise
@@ -393,7 +435,7 @@ class NotionAPIWrapper:
         try:
             # Get the root page itself
             time.sleep(self._rate_limit_delay)
-            root_page = self.client.pages.retrieve(page_id=root_id)
+            root_page = self._retry_on_rate_limit(self.client.pages.retrieve, page_id=root_id)
             root_title = _extract_page_title(root_page)
             if root_title:
                 title_map[root_title] = root_id
@@ -449,7 +491,7 @@ class NotionAPIWrapper:
             try:
                 # Get the page itself
                 time.sleep(self._rate_limit_delay)
-                page = self.client.pages.retrieve(page_id=page_id)
+                page = self._retry_on_rate_limit(self.client.pages.retrieve, page_id=page_id)
                 page_title = _extract_page_title(page) or ""
                 all_pages[page_id] = page_title
                 batch[page_id] = page_title
@@ -509,7 +551,7 @@ class NotionAPIWrapper:
         while True:
             time.sleep(self._rate_limit_delay)
             try:
-                resp = self.client.search(start_cursor=start_cursor, page_size=100)
+                resp = self._retry_on_rate_limit(self.client.search, start_cursor=start_cursor, page_size=100)
                 results = resp.get("results", [])
                 for obj in results:
                     obj_id = obj.get("id")
@@ -561,18 +603,24 @@ class NotionAPIWrapper:
             if start_cursor:
                 payload["start_cursor"] = start_cursor
             
-            try:
+            def _query_db():
                 response = requests.post(
                     f"https://api.notion.com/v1/databases/{database_id}/query",
                     headers=headers,
                     json=payload,
                     timeout=30,
                 )
-                
                 if response.status_code != 200:
                     error_data = response.json() if response.text else {}
-                    logger.warning(f"Failed to query database {database_id}: {error_data.get('message', response.text)}")
-                    break
+                    raise APIResponseError(
+                        response.status_code,
+                        error_data.get('message', response.text),
+                        error_data
+                    )
+                return response
+            
+            try:
+                response = self._retry_on_rate_limit(_query_db)
                 
                 data = response.json()
                 pages = data.get("results", [])
@@ -659,18 +707,24 @@ class NotionAPIWrapper:
             if start_cursor:
                 payload["start_cursor"] = start_cursor
 
-            try:
+            def _query_db():
                 response = requests.post(
                     f"https://api.notion.com/v1/databases/{database_id}/query",
                     headers=headers,
                     json=payload,
                     timeout=30,
                 )
-                
                 if response.status_code != 200:
                     error_data = response.json() if response.text else {}
-                    logger.warning(f"Failed to query database {database_id}: {error_data.get('message', response.text)}")
-                    break
+                    raise APIResponseError(
+                        response.status_code,
+                        error_data.get('message', response.text),
+                        error_data
+                    )
+                return response
+
+            try:
+                response = self._retry_on_rate_limit(_query_db)
                 
                 data = response.json()
                 pages = data.get("results", [])
@@ -750,15 +804,27 @@ class NotionAPIWrapper:
         logger.debug(f"Creating single-part file upload for {filename} ({len(file_data)} bytes)")
         time.sleep(self._rate_limit_delay)
         
-        create_response = requests.post(
-            "https://api.notion.com/v1/file_uploads",
-            headers=headers,
-            json={
-                "mode": "single_part",
-                "filename": filename,
-            },
-            timeout=30,
-        )
+        def _create_upload():
+            response = requests.post(
+                "https://api.notion.com/v1/file_uploads",
+                headers=headers,
+                json={
+                    "mode": "single_part",
+                    "filename": filename,
+                },
+                timeout=30,
+            )
+            if response.status_code != 200:
+                error_data = response.json() if response.text else {}
+                error_msg = error_data.get("message", response.text)
+                raise APIResponseError(
+                    response.status_code,
+                    f"Failed to create file upload: {error_msg}",
+                    error_data
+                )
+            return response
+        
+        create_response = self._retry_on_rate_limit(_create_upload)
         
         if create_response.status_code != 200:
             error_data = create_response.json() if create_response.text else {}
@@ -826,16 +892,28 @@ class NotionAPIWrapper:
         logger.debug(f"Creating multi-part file upload for {filename}")
         time.sleep(self._rate_limit_delay)
         
-        create_response = requests.post(
-            "https://api.notion.com/v1/file_uploads",
-            headers=headers,
-            json={
-                "mode": "multi_part",
-                "filename": filename,
-                "num_parts": num_chunks,
-            },
-            timeout=30,
-        )
+        def _create_multipart():
+            response = requests.post(
+                "https://api.notion.com/v1/file_uploads",
+                headers=headers,
+                json={
+                    "mode": "multi_part",
+                    "filename": filename,
+                    "number_of_parts": num_chunks,
+                },
+                timeout=30,
+            )
+            if response.status_code != 200:
+                error_data = response.json() if response.text else {}
+                error_msg = error_data.get("message", response.text)
+                raise APIResponseError(
+                    response.status_code,
+                    f"Failed to create multi-part upload: {error_msg}",
+                    error_data
+                )
+            return response
+        
+        create_response = self._retry_on_rate_limit(_create_multipart)
         
         if create_response.status_code != 200:
             error_data = create_response.json() if create_response.text else {}
@@ -890,12 +968,24 @@ class NotionAPIWrapper:
         logger.debug(f"Completing multi-part upload")
         time.sleep(self._rate_limit_delay)
         
-        complete_response = requests.post(
-            f"https://api.notion.com/v1/file_uploads/{upload_id}/complete",
-            headers=headers,
-            json={},  # Empty body required
-            timeout=30,
-        )
+        def _complete_multipart():
+            response = requests.post(
+                f"https://api.notion.com/v1/file_uploads/{upload_id}/complete",
+                headers=headers,
+                json={},  # Empty body required
+                timeout=30,
+            )
+            if response.status_code != 200:
+                error_data = response.json() if response.text else {}
+                error_msg = error_data.get("message", response.text)
+                raise APIResponseError(
+                    response.status_code,
+                    f"Failed to complete upload: {error_msg}",
+                    error_data
+                )
+            return response
+        
+        complete_response = self._retry_on_rate_limit(_complete_multipart)
         
         if complete_response.status_code != 200:
             error_data = complete_response.json() if complete_response.text else {}

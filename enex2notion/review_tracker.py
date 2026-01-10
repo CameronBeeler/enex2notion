@@ -6,7 +6,7 @@ from enex2notion.notion_api_wrapper import NotionAPIWrapper
 
 logger = logging.getLogger(__name__)
 
-REVIEW_DB_TITLE = "Link Resolution Review"
+REVIEW_DB_TITLE = "Page-Title mention conversion failures"
 
 
 class ReviewTracker:
@@ -89,6 +89,7 @@ class ReviewTracker:
         schema = {
             "Page-Title": {"title": {}},  # The visible link text
             "Source-Page": {"rich_text": {}},  # Source page title where link was found
+            "ImportSource": {"rich_text": {}},  # Parent page or database name
             "Original URL": {"url": {}},
             "Source Block URL": {"url": {}},
             "Target Page URL": {"url": {}},
@@ -112,18 +113,22 @@ class ReviewTracker:
                  source_page_id: str,
                  original_url: str,
                  status: str,
+                 import_source: str | None = None,
                  source_block_id: str | None = None,
                  target_page_id: str | None = None,
                  target_page_title: str | None = None):
         """Log a page's link resolution results to the review database.
         
         Args:
-            title: Source page title being processed (where links are found)
-            page_id: Source page ID being processed
-            matched: Number of matched links
-            unmatched: Number of unmatched links
-            ambiguous: Number of ambiguous links
-            status: Overall status (Resolved, Partial, Ambiguous, Unresolved)
+            link_text: The visible link text used for matching
+            source_page_title: Source page title where link was found
+            source_page_id: Source page ID where link was found
+            original_url: Original Evernote URL
+            status: Link status (Resolved, Partial, Ambiguous, Unresolved)
+            import_source: Parent page or database name (optional)
+            source_block_id: Block ID where link was found (optional)
+            target_page_id: Target page ID if resolved (optional)
+            target_page_title: Target page title if resolved (optional)
         """
         db_id = self.ensure_db()
         # Build URLs
@@ -140,6 +145,7 @@ class ReviewTracker:
         props = {
             "Page-Title": {"title": [{"type": "text", "text": {"content": page_title_text}}]},
             "Source-Page": {"rich_text": [{"type": "text", "text": {"content": source_page_title or ""}}]},
+            "ImportSource": {"rich_text": [{"type": "text", "text": {"content": import_source or ""}}]},
             "Original URL": {"url": original_url},
             "Source Block URL": {"url": block_url},
             "Target Page URL": {"url": target_url},

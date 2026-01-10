@@ -16,7 +16,9 @@ class NotebookStats:
     successful: int = 0
     failed: int = 0
     skipped: int = 0
+    unsupported_files: int = 0  # Files saved to disk (unsupported type)
     failed_directory: Path | None = None
+    unsupported_files_directory: Path | None = None  # Where unsupported files were saved
 
     @property
     def success_rate(self) -> float:
@@ -52,6 +54,10 @@ class ImportSummary:
     @property
     def total_skipped(self) -> int:
         return sum(nb.skipped for nb in self.notebooks)
+
+    @property
+    def total_unsupported_files(self) -> int:
+        return sum(nb.unsupported_files for nb in self.notebooks)
 
     @property
     def success_rate(self) -> float:
@@ -126,6 +132,9 @@ def generate_report(summary: ImportSummary) -> str:
             skip_pct = (nb_stats.skipped / nb_stats.total * 100) if nb_stats.total > 0 else 0
             lines.append(f"  Skipped:         {nb_stats.skipped:5d}  ({skip_pct:5.1f}%)")
 
+        if nb_stats.unsupported_files > 0:
+            lines.append(f"  Unsupported Files: {nb_stats.unsupported_files:5d}  (saved to disk)")
+
         lines.append("")
 
     # Overall totals
@@ -141,6 +150,9 @@ def generate_report(summary: ImportSummary) -> str:
         skip_pct = (summary.total_skipped / summary.total_notes * 100) if summary.total_notes > 0 else 0
         lines.append(f"  Skipped:         {summary.total_skipped:5d}  ({skip_pct:5.1f}%)")
 
+    if summary.total_unsupported_files > 0:
+        lines.append(f"  Unsupported Files: {summary.total_unsupported_files:5d}  (saved to disk)")
+
     lines.append("")
 
     # Unimported directories
@@ -149,6 +161,15 @@ def generate_report(summary: ImportSummary) -> str:
         for notebook_name, unimported_dir in summary.failed_directories:
             if unimported_dir:
                 lines.append(f"  - {unimported_dir.name}")
+        lines.append("")
+
+    # Unsupported files directories
+    unsupported_dirs = [(nb.notebook_name, nb.unsupported_files_directory) 
+                       for nb in summary.notebooks if nb.unsupported_files > 0 and nb.unsupported_files_directory]
+    if unsupported_dirs:
+        lines.append("Unsupported Files Saved To:")
+        for notebook_name, unsupported_dir in unsupported_dirs:
+            lines.append(f"  - {notebook_name}: {unsupported_dir}")
         lines.append("")
 
     # Duration

@@ -49,10 +49,13 @@ def _upload_cli(args):
     rejected_tracker = None
     if hasattr(args, "rejected_files") and args.rejected_files:
         rejected_tracker = RejectedFilesTracker(Path(args.rejected_files))
+    
+    # Get unsupported files directory
+    unsupported_dir = getattr(args, "unsupported_files", None)
 
     enex_uploader = EnexUploader(
         wrapper=wrapper, root_id=root_id, mode=args.mode, done_file=args.done_file, rules=rules, 
-        rejected_tracker=rejected_tracker
+        rejected_tracker=rejected_tracker, unsupported_dir=unsupported_dir
     )
 
     # Track overall import statistics

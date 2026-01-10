@@ -546,8 +546,16 @@ def _convert_text_with_all_links(
     if prefix:
         result.extend(_split_text_if_needed(prefix, annotations))
     
-    # Look up target page ID (case-insensitive)
-    target_page_id = link_lookup.get((link_text or "").lower())
+    # Look up target page ID (normalized - must match how link_lookup was built)
+    # Normalization: casefold, collapse whitespace, strip (matches _norm() in cli_resolve_links)
+    def _normalize_for_lookup(s: str) -> str:
+        if not s:
+            return ""
+        s = s.replace("\u00A0", " ")  # NBSP -> space
+        s = " ".join(s.split())  # collapse whitespace
+        return s.casefold()
+    
+    target_page_id = link_lookup.get(_normalize_for_lookup(link_text or ""))
     
     # Add link/mention
     if target_page_id:

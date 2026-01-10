@@ -55,25 +55,46 @@ def _get_resource_filename(notion_block) -> str:
     return "unknown file"
 
 
-def _create_failed_upload_placeholder(filename: str, file_type: str) -> dict[str, Any]:
+def _get_download_location(notion_block) -> str:
+    """Extract download location from a resource block.
+    
+    Args:
+        notion_block: NotionUploadableBlock with a resource attribute
+        
+    Returns:
+        Download location string, or None if not found
+    """
+    if hasattr(notion_block, "resource") and notion_block.resource:
+        resource = notion_block.resource
+        if hasattr(resource, "attrs") and isinstance(resource.attrs, dict):
+            return resource.attrs.get("download_location")
+    return None
+
+
+def _create_failed_upload_placeholder(filename: str, file_type: str, download_location: str = None) -> dict[str, Any]:
     """Create a visible placeholder for a failed file upload.
     
     Args:
         filename: Name of the file that failed to upload
         file_type: Type of file ("image", "PDF", "file")
+        download_location: Optional path where file was saved to disk
         
     Returns:
         Callout block dict in API format
     """
+    # Build message
+    if download_location:
+        message = f"📎 File saved to disk (Notion doesn't support this type): \"{filename}\"\nDownload from: {download_location}"
+    else:
+        message = f"⚠️ {file_type.capitalize()} attachment failed to import: \"{filename}\""
+    
     return {
         "type": "callout",
         "callout": {
             "rich_text": [
                 {
                     "type": "text",
-                    "text": {
-                        "content": f"⚠️ {file_type.capitalize()} attachment failed to import: \"{filename}\""
-                    },
+                    "text": {"content": message},
                     "annotations": {
                         "bold": False,
                         "italic": True,
@@ -84,8 +105,8 @@ def _create_failed_upload_placeholder(filename: str, file_type: str) -> dict[str
                     }
                 }
             ],
-            "icon": {"type": "emoji", "emoji": "⚠️"},
-            "color": "yellow_background"
+            "icon": {"type": "emoji", "emoji": "📎" if download_location else "⚠️"},
+            "color": "blue_background" if download_location else "yellow_background"
         }
     }
 
@@ -160,6 +181,7 @@ def convert_block_to_api_format(notion_block) -> dict[str, Any] | list[dict[str,
         "NotionQuoteBlock": _convert_quote,
         "NotionCalloutBlock": _convert_callout,
         "NotionImageBlock": _convert_image,
+        "NotionImageEmbedBlock": _convert_image_embed,
         "NotionVideoBlock": _convert_video,
         "NotionAudioBlock": _convert_audio,
         "NotionPDFBlock": _convert_pdf,
@@ -199,13 +221,7 @@ def _convert_text_block(notion_block) -> dict[str, Any] | list[dict[str, Any]]:
         }
     }]
     
-    # Add overflow as additional paragraphs with warning marker
-    if overflow:
-        # Insert warning marker before continuation blocks
-        blocks.append(_create_inline_warning_marker(
-            f"Paragraph split into {len(overflow) + 1} blocks (API limit: 100 formatting segments per block)"
-        ))
-    
+    # Add overflow as additional paragraphs (no warning - this is normal API behavior)
     for overflow_chunk in overflow:
         blocks.append({
             "type": "paragraph",
@@ -363,7 +379,8 @@ def _convert_image(notion_block) -> dict[str, Any]:
         if upload_failed:
             # Create a visible placeholder paragraph
             filename = _get_resource_filename(notion_block)
-            return _create_failed_upload_placeholder(filename, "image")
+            download_loc = _get_download_location(notion_block)
+            return _create_failed_upload_placeholder(filename, "image", download_loc)
         logger.warning("Image block has no file_upload_id - skipping")
         return None
     
@@ -373,6 +390,32 @@ def _convert_image(notion_block) -> dict[str, Any]:
             "type": "file_upload",
             "file_upload": {
                 "id": file_upload_id
+            }
+        }
+    }
+
+
+def _convert_image_embed(notion_block) -> dict[str, Any]:
+    """Convert external image embed block.
+    
+    Uses external type with the source URL.
+    Let Notion's API validate the URL.
+    """
+    # Get source URL from block attributes
+    source_url = notion_block.attrs.get("source") or notion_block.attrs.get("display_source")
+    
+    if not source_url:
+        logger.warning("Image embed block has no source URL - skipping")
+        return None
+    
+    logger.debug(f"Creating external image embed with URL: {source_url}")
+    
+    return {
+        "type": "image",
+        "image": {
+            "type": "external",
+            "external": {
+                "url": source_url
             }
         }
     }
@@ -417,13 +460,10 @@ def _convert_text_prop_with_overflow(text_prop) -> tuple[list[dict[str, Any]], l
     
     # Notion API limit: max 100 rich_text items per block
     if len(rich_text_items) > 100:
-        add_warning(
-            f"Paragraph split into {(len(rich_text_items) + 99) // 100} continuation blocks "
-            f"(API limit: 100 formatting segments per block, had {len(rich_text_items)})"
-        )
-        logger.warning(
-            f"Rich text array has {len(rich_text_items)} items, splitting into continuation blocks. "
-            "Content will be preserved."
+        # Split into multiple blocks - this is normal API behavior, not an error
+        logger.debug(
+            f"Rich text array has {len(rich_text_items)} items, splitting into "
+            f"{(len(rich_text_items) + 99) // 100} continuation blocks. Content will be preserved."
         )
         main_text = rich_text_items[:100]
         overflow_chunks = [
@@ -540,10 +580,13 @@ def _create_rich_text_object(text: str, formatting: list) -> dict[str, Any]:
                 rich_text_obj["text"]["content"] = f"[{text}]({link_url})"
                 logger.debug(f"Converted evernote:// link to markdown (not an error): {link_url}")
             else:
-                # Other invalid URLs: This IS an error - add warning marker and track as partial import
-                rich_text_obj["text"]["content"] = f"⚠️ {text}"
-                add_warning(f"Unsupported URL scheme removed: {link_url[:80]}")
-                logger.warning(f"Removed unsupported URL (keeping text): {link_url[:100]}")
+                # Other invalid URLs: Mark as broken link (don't treat as error)
+                # Add broken-link marker with error icon next to the link text
+                rich_text_obj["text"]["content"] = f"🔗❌ {text}"
+                # Store the invalid URL info in attrs for later tracking
+                # Note: rich_text doesn't have attrs, so we'll need to handle this differently
+                # For now, just log it - tracking will happen at a higher level
+                logger.info(f"Invalid URL marked with broken-link icon: {link_url[:100]}")
     
     return rich_text_obj
 
@@ -618,7 +661,8 @@ def _convert_pdf(notion_block) -> dict[str, Any]:
         if upload_failed:
             # Create a visible placeholder paragraph
             filename = _get_resource_filename(notion_block)
-            return _create_failed_upload_placeholder(filename, "PDF")
+            download_loc = _get_download_location(notion_block)
+            return _create_failed_upload_placeholder(filename, "PDF", download_loc)
         logger.warning("PDF block has no file_upload_id - skipping")
         return None
     
@@ -647,7 +691,8 @@ def _convert_video(notion_block) -> dict[str, Any]:
         if upload_failed:
             # Create a visible placeholder paragraph
             filename = _get_resource_filename(notion_block)
-            return _create_failed_upload_placeholder(filename, "video")
+            download_loc = _get_download_location(notion_block)
+            return _create_failed_upload_placeholder(filename, "video", download_loc)
         logger.warning("Video block has no file_upload_id - skipping")
         return None
     
@@ -676,7 +721,8 @@ def _convert_audio(notion_block) -> dict[str, Any]:
         if upload_failed:
             # Create a visible placeholder paragraph
             filename = _get_resource_filename(notion_block)
-            return _create_failed_upload_placeholder(filename, "audio")
+            download_loc = _get_download_location(notion_block)
+            return _create_failed_upload_placeholder(filename, "audio", download_loc)
         logger.warning("Audio block has no file_upload_id - skipping")
         return None
     
@@ -705,7 +751,8 @@ def _convert_file(notion_block) -> dict[str, Any]:
         if upload_failed:
             # Create a visible placeholder paragraph
             filename = _get_resource_filename(notion_block)
-            return _create_failed_upload_placeholder(filename, "file")
+            download_loc = _get_download_location(notion_block)
+            return _create_failed_upload_placeholder(filename, "file", download_loc)
         logger.warning("File block has no file_upload_id - skipping")
         return None
     

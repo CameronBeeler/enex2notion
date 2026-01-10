@@ -362,6 +362,26 @@ def resolve_links_command(wrapper: NotionAPIWrapper, root_id: str, args):
     
     # Track if we've already initialized exception pages for this run
     exception_pages_initialized = False
+    
+    # Helper to get parent page/database name
+    def _get_import_source(page_id: str) -> str:
+        """Retrieve the parent page or database name for a given page."""
+        try:
+            page_obj = wrapper.client.pages.retrieve(page_id=page_id)
+            parent = page_obj.get("parent", {})
+            parent_type = parent.get("type")
+            if parent_type == "page_id":
+                parent_id = parent.get("page_id")
+                return id_to_title.get(parent_id, "Unknown Page")
+            elif parent_type == "database_id":
+                parent_id = parent.get("database_id")
+                return id_to_title.get(parent_id, "Unknown Database")
+            elif parent_type == "workspace":
+                return "Workspace Root"
+            return "Unknown"
+        except Exception as e:
+            logger.warning(f"Failed to get parent info for {page_id}: {e}")
+            return "Unknown"
 
     # Group found link refs by page
     refs_by_page = {}
@@ -452,23 +472,37 @@ def resolve_links_command(wrapper: NotionAPIWrapper, root_id: str, args):
                     wrapper.update_block(block_id, {block_type: {"rich_text": updated_rich_text}})
                     stats.links_updated += len(element_refs)
                     
-                    # Log review rows for each ref in this element
+                    # Log review rows ONLY for unresolved/ambiguous links
                     if review:
+                        # Get import source once per page (cached)
+                        if not hasattr(_get_import_source, '_cache'):
+                            _get_import_source._cache = {}
+                        if page_id not in _get_import_source._cache:
+                            _get_import_source._cache[page_id] = _get_import_source(page_id)
+                        import_source = _get_import_source._cache[page_id]
+                        
                         for ref in element_refs:
                             # Determine status per ref (matched/ambiguous/unmatched)
                             key = _norm(ref.link_text or "")
                             tgt_id = link_lookup.get(key)
-                            status_row = "Resolved" if tgt_id else ("Ambiguous" if any(r[0] == ref for r in [*page_ambig]) else "Unresolved")
-                            tgt_title = id_to_title.get(tgt_id, "") if tgt_id else None
+                            
+                            # Skip resolved links - only log unresolved/ambiguous
+                            if tgt_id:  # Successfully resolved
+                                continue
+                            
+                            # Determine if ambiguous or unresolved
+                            status_row = "Ambiguous" if any(r[0] == ref for r in [*page_ambig]) else "Unresolved"
+                            
                             review.log_link(
                                 link_text=ref.link_text,
                                 source_page_title=page_title,
                                 source_page_id=page_id,
                                 original_url=ref.original_url,
                                 status=status_row,
+                                import_source=import_source,
                                 source_block_id=ref.block_id,
-                                target_page_id=tgt_id,
-                                target_page_title=tgt_title,
+                                target_page_id=None,
+                                target_page_title=None,
                             )
                 except Exception as e:
                     error_msg = str(e)
@@ -483,15 +517,11 @@ def resolve_links_command(wrapper: NotionAPIWrapper, root_id: str, args):
                         )
                         exception_pages_initialized = True
             
-            # Track exceptions
-            for ref, cands in page_ambig:
-                recreate = is_full_run and not exception_pages_initialized
-                tracker.track_ambiguous_link(page_title, page_id, ref.link_text, cands, block_id=ref.block_id, recreate=recreate)
-                exception_pages_initialized = True
-            for ref in page_unmatched:
-                recreate = is_full_run and not exception_pages_initialized
-                tracker.track_unmatched_link(page_title, page_id, ref.link_text, ref.original_url, block_id=ref.block_id, recreate=recreate)
-                exception_pages_initialized = True
+            # NOTE: Unmatched and ambiguous links are now tracked in the review database
+            # ("Page-Title mention conversion failures") with full details including ImportSource.
+            # The old EvernoteLinkFailure and UnresolvableEvernoteLinks pages are no longer populated
+            # for normal unmatched/ambiguous links. They are only used for technical failures
+            # (e.g., block update failures, rich_text array too large).
             
             # Compute page status for queue update
             matched_count = len(page_matched)
