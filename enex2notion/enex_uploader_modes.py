@@ -27,8 +27,11 @@ def _get_notebook_page(wrapper, root_page_id, title):
     """Internal: Get or create notebook page."""
     # Search for existing page
     pages = wrapper.search_pages(title)
+    
+    # Filter out archived/deleted items
+    active_pages = [p for p in pages if not p.get("archived", False) and not p.get("in_trash", False)]
 
-    for page in pages:
+    for page in active_pages:
         if page.get("parent", {}).get("page_id") == root_page_id:
             logger.info(f"Found existing notebook page: {title}")
             return page["id"]
@@ -64,8 +67,15 @@ def _get_notebook_database(wrapper, root_page_id, title):
     logger.debug(f"Searching for existing database '{title}'...")
     pages = wrapper.search_pages(title, include_databases=True)
     logger.debug(f"  Search returned {len(pages)} results")
+    
+    # Filter out archived/deleted items
+    active_items = [p for p in pages if not p.get("archived", False) and not p.get("in_trash", False)]
+    archived_count = len(pages) - len(active_items)
+    if archived_count > 0:
+        logger.debug(f"  Filtered out {archived_count} archived/deleted item(s)")
+    logger.debug(f"  {len(active_items)} active item(s) to check")
 
-    for page in pages:
+    for page in active_items:
         logger.debug(f"  Checking: object={page.get('object')}, title={page.get('title', [{}])[0].get('plain_text') if page.get('title') else 'N/A'}")
         if page.get("object") == "database" and page.get("parent", {}).get("page_id") == root_page_id:
             database_id = page["id"]

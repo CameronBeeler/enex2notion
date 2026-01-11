@@ -78,7 +78,7 @@ class DoneFile(object):
 
 class EnexUploader(object):
     def __init__(
-        self, wrapper, root_id, mode: str, done_file: Path | None, rules: Rules, rejected_tracker=None, unsupported_dir: Path | None = None
+        self, wrapper, root_id, mode: str, done_file: Path | None, rules: Rules, rejected_tracker=None, unsupported_dir: Path | None = None, working_dir: Path | None = None
     ):
         self.wrapper = wrapper  # NotionAPIWrapper instance
         self.root_id = root_id  # Root page ID string
@@ -90,8 +90,21 @@ class EnexUploader(object):
         self.rejected_tracker = rejected_tracker
         self.unsupported_dir = unsupported_dir
         
+        # Determine working directory for cache
+        # Priority: explicit working_dir, done_file parent, unsupported_dir parent, cwd
+        if working_dir:
+            cache_dir = working_dir
+        elif done_file and done_file.is_absolute():
+            cache_dir = done_file.parent
+        elif unsupported_dir and unsupported_dir.is_absolute():
+            cache_dir = unsupported_dir.parent
+        else:
+            cache_dir = Path.cwd()
+        
+        logger.debug(f"Using cache directory: {cache_dir}")
+        
         # Initialize exception tracker for partial imports
-        self.exception_tracker = ExceptionTracker(wrapper, root_id) if wrapper else None
+        self.exception_tracker = ExceptionTracker(wrapper, root_id, cache_dir) if wrapper else None
 
         self.notebook_root = None
         self.notebook_schema = None  # Store database schema if in DB mode
@@ -118,6 +131,14 @@ class EnexUploader(object):
 
         # Initialize stats
         notebook_stats = NotebookStats(notebook_name=notebook_name, enex_file=enex_file)
+
+        # Initialize exception infrastructure before processing
+        if self.exception_tracker:
+            try:
+                self.exception_tracker.initialize_infrastructure()
+            except Exception as e:
+                logger.warning(f"Failed to initialize exception infrastructure: {e}")
+                # Continue with processing - infrastructure will be created on-demand if needed
 
         # Phase 1: Parse all notes in single pass (with optional filtering)
         logger.debug(f"Parsing ENEX file '{enex_file.name}'...")
@@ -203,27 +224,57 @@ class EnexUploader(object):
         logger.info(f"Uploading note {note_idx}/{total_notes}: '{note.title}'")
 
         try:
-            page_id, has_errors, updated_errors, failed_uploads = self._upload_note(self.notebook_root, note, note_blocks, errors, notebook_name)
+            page_id, has_errors, updated_errors, failed_uploads, user_action_blocks = self._upload_note(self.notebook_root, note, note_blocks, errors, notebook_name)
             self.done_hashes.add(note.note_hash)
             
-            # Track partial import in exception summary page (use updated errors with warnings)
+            # Track partial import in exception summary page
+            # Filter out user-actionable errors (they go in the User Action Required database instead)
             if has_errors and self.exception_tracker:
-                self.exception_tracker.track_partial_import(
-                    notebook_name=notebook_name,
-                    note_title=note.title,
-                    page_id=page_id,
-                    errors=updated_errors
-                )
+                # Separate user-actionable errors from informational errors
+                informational_errors = []
+                
+                for error in updated_errors:
+                    # Skip user-actionable errors (they're in the database)
+                    if any(pattern in error for pattern in [
+                        "Invalid URL marked with broken-link icon",
+                        "Invalid bookmark URL",
+                        "Image embed missing source URL",
+                        "File upload failed",
+                        "saved to unsupported-files"
+                    ]):
+                        continue
+                    informational_errors.append(error)
+                
+                # Only track if there are informational errors
+                # User-actionable items are in the database, no need to reference them here
+                if informational_errors:
+                    self.exception_tracker.track_partial_import(
+                        notebook_name=notebook_name,
+                        note_title=note.title,
+                        page_id=page_id,
+                        errors=informational_errors
+                    )
+            
+            # Find the block ID for the first user action marker (for file uploads)
+            # We'll use the first marker block ID since file upload failures create markers
+            first_marker_block_id = None
+            if user_action_blocks:
+                # Get the first marker block ID (sorted by index)
+                first_marker_block_id = user_action_blocks.get(min(user_action_blocks.keys()))
             
             # Add failed file uploads to exceptions database
             if failed_uploads and self.exception_tracker:
-                for failed_file in failed_uploads:
+                for idx, failed_file in enumerate(failed_uploads):
+                    # Try to find the corresponding marker block for this file
+                    # For now, use the first marker since we typically have one marker per file
+                    block_id = list(user_action_blocks.values())[idx] if idx < len(user_action_blocks) else first_marker_block_id
                     self.exception_tracker.add_exception_to_database(
                         notebook_name=notebook_name,
                         note_title=note.title,
                         page_id=page_id,
                         error_type="File Upload Failed",
-                        error_detail=f"{failed_file['filename']} saved to {failed_file['path']}"
+                        error_detail=f"{failed_file['filename']} saved to {failed_file['path']}",
+                        block_id=block_id
                     )
             
             # Add other user-actionable warnings to database
@@ -236,16 +287,21 @@ class EnexUploader(object):
                             note_title=note.title,
                             page_id=page_id,
                             error_type="Invalid URL",
-                            error_detail="Image embed missing source URL"
+                            error_detail="Image embed missing source URL",
+                            block_id=first_marker_block_id
                         )
                     # Check for invalid URL warnings (broken links)
                     elif "Invalid bookmark URL" in error or "Invalid URL marked with broken-link icon" in error:
+                        # Extract the URL from the error message for better context
+                        # Error format: "Invalid URL marked with broken-link icon: <url>"
+                        url_detail = error.split(":", 1)[1].strip() if ":" in error else error[:150]
                         self.exception_tracker.add_exception_to_database(
                             notebook_name=notebook_name,
                             note_title=note.title,
                             page_id=page_id,
                             error_type="Invalid URL",
-                            error_detail=error[:100]  # Truncate to first 100 chars
+                            error_detail=url_detail[:150],  # Include the actual URL
+                            block_id=None  # No block-level link available for inline URLs
                         )
             
             return "success", None

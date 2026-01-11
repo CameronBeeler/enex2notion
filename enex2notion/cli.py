@@ -35,9 +35,67 @@ def cli(argv):
         _upload_cli(args)
 
 
+def _apply_operations_dir(args):
+    """Apply operations-dir to file paths.
+    
+    If --operations-dir is specified:
+    - All operational files use operations-dir as base
+    - Individual flags (--done-file, --summary) can still override with absolute paths
+    - Relative paths in individual flags are relative to operations-dir
+    """
+    ops_dir = getattr(args, 'operations_dir', None)
+    
+    if not ops_dir:
+        return None
+    
+    # Create operations directory
+    ops_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Apply operations-dir as base for all file paths
+    
+    # done_file: resolve relative paths to operations-dir
+    if args.done_file:
+        if not args.done_file.is_absolute():
+            args.done_file = ops_dir / args.done_file
+    # Note: done_file defaults are handled per-notebook in uploader
+    
+    # summary: use operations-dir if not specified, or resolve relative paths
+    if args.summary:
+        if not args.summary.is_absolute():
+            args.summary = ops_dir / args.summary
+    else:
+        args.summary = ops_dir / "summary.txt"
+    
+    # rejected_files
+    if getattr(args, 'rejected_files', None):
+        if not args.rejected_files.is_absolute():
+            args.rejected_files = ops_dir / args.rejected_files
+    else:
+        args.rejected_files = ops_dir / "rejected-files.csv"
+    
+    # unsupported_files
+    if getattr(args, 'unsupported_files', None):
+        if not args.unsupported_files.is_absolute():
+            args.unsupported_files = ops_dir / args.unsupported_files
+    else:
+        args.unsupported_files = ops_dir / "unsupported-files"
+    
+    # log
+    if args.log:
+        if not args.log.is_absolute():
+            args.log = ops_dir / args.log
+    else:
+        args.log = ops_dir / "enex2notion.log"
+    
+    return ops_dir
+
+
 def _upload_cli(args):
     """Execute the upload command (default)."""
     rules = Rules.from_args(args)
+    
+    # Apply operations-dir defaults
+    ops_dir = _apply_operations_dir(args)
     
     # Print configuration summary
     _print_configuration_summary(args, rules)
@@ -55,7 +113,7 @@ def _upload_cli(args):
 
     enex_uploader = EnexUploader(
         wrapper=wrapper, root_id=root_id, mode=args.mode, done_file=args.done_file, rules=rules, 
-        rejected_tracker=rejected_tracker, unsupported_dir=unsupported_dir
+        rejected_tracker=rejected_tracker, unsupported_dir=unsupported_dir, working_dir=ops_dir
     )
 
     # Track overall import statistics

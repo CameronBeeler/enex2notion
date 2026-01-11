@@ -5,7 +5,10 @@ Manages the "Exceptions" summary page structure with real-time updates:
 """
 import logging
 import time
-from typing import Any
+from pathlib import Path
+from typing import Any, Optional
+
+from enex2notion.infrastructure_cache import InfrastructureCache
 
 logger = logging.getLogger(__name__)
 
@@ -13,12 +16,13 @@ logger = logging.getLogger(__name__)
 class ExceptionTracker:
     """Tracks partial imports and maintains exception summary pages."""
 
-    def __init__(self, wrapper, root_id: str):
+    def __init__(self, wrapper, root_id: str, working_dir: Optional[Path] = None):
         """Initialize exception tracker.
 
         Args:
             wrapper: NotionAPIWrapper instance
             root_id: Root page ID for creating exception pages
+            working_dir: Directory for cache file (defaults to current directory)
         """
         self.wrapper = wrapper
         self.root_id = root_id
@@ -27,6 +31,11 @@ class ExceptionTracker:
         self._special_pages_cache = {}  # title -> page_id (cached after first lookup/create)
         self._exceptions_database_id = None  # Database ID for user-actionable exceptions
         self._exception_counter = {}  # Counter for generating unique titles
+        
+        # Initialize infrastructure cache
+        cache_dir = working_dir or Path.cwd()
+        self._cache = InfrastructureCache(cache_dir)
+        logger.debug(f"Using cache directory: {cache_dir}")
     
     def initialize_infrastructure(self):
         """Pre-create Exceptions page and User Action Required database.
@@ -40,10 +49,13 @@ class ExceptionTracker:
         exceptions_page_id = self.ensure_exceptions_page()
         logger.info(f"✓ Exceptions page ready: {exceptions_page_id}")
         
-        # Create User Action Required database
+        # Create User Action Required database (and clean up duplicates)
         self._create_exceptions_database()
         if self._exceptions_database_id:
             logger.info(f"✓ User Action Required database ready: {self._exceptions_database_id}")
+            
+            # Check for and clean up duplicate databases
+            self._cleanup_duplicate_databases()
         
         logger.info("Exception tracking infrastructure initialized")
 
@@ -55,21 +67,49 @@ class ExceptionTracker:
         """
         if self._exceptions_page_id:
             return self._exceptions_page_id
+        
+        # Check cache first
+        cached_id = self._cache.get_exceptions_page_id()
+        if cached_id:
+            logger.info(f"Using Exceptions page from cache: {cached_id}")
+            # Verify the page exists and isn't archived
+            try:
+                page = self.wrapper.client.pages.retrieve(page_id=cached_id)
+                if page.get("archived") or page.get("in_trash"):
+                    logger.warning(f"Cached Exceptions page is archived/trashed, will create new one")
+                    self._cache.set_exceptions_page_id("")  # Clear invalid cache
+                    cached_id = None
+                else:
+                    self._exceptions_page_id = cached_id
+                    logger.info(f"✓ Exceptions page validated")
+                    return cached_id
+            except Exception as e:
+                logger.warning(f"Cached Exceptions page not accessible: {e}")
+                self._cache.set_exceptions_page_id("")  # Clear invalid cache
+                cached_id = None
+        
+        if not cached_id:
+            logger.debug("No valid Exceptions page in cache")
 
         # Search for existing "Exceptions" page
         logger.debug("Searching for existing 'Exceptions' page...")
         pages = self.wrapper.search_pages("Exceptions")
+        
+        # Filter out archived/deleted items
+        active_pages = [p for p in pages if not p.get("archived", False) and not p.get("in_trash", False)]
 
-        for page in pages:
+        for page in active_pages:
             if page.get("parent", {}).get("page_id") == self.root_id:
                 self._exceptions_page_id = page["id"]
                 logger.info("Found existing 'Exceptions' summary page")
+                self._cache.set_exceptions_page_id(self._exceptions_page_id)
                 return self._exceptions_page_id
 
         # Create new exceptions page
         logger.info("Creating 'Exceptions' summary page...")
         page = self.wrapper.create_page(parent_id=self.root_id, title="Exceptions")
         self._exceptions_page_id = page["id"]
+        self._cache.set_exceptions_page_id(self._exceptions_page_id)
 
         # Add intro paragraph
         intro_blocks = [
@@ -101,21 +141,92 @@ class ExceptionTracker:
         - Invalid URLs that need manual fixing
         - Tables that were split and may need manual review/consolidation
         """
+        # Check if we already have a cached database ID
         if self._exceptions_database_id:
-            return
+            logger.debug(f"Found cached database ID: {self._exceptions_database_id}, validating...")
+            # Verify it still exists and is valid
+            try:
+                db_schema = self.wrapper.get_database(self._exceptions_database_id)
+                properties = db_schema.get("properties", {})
+                if "Error Type" in properties:
+                    logger.info(f"Using existing 'User Action Required' database: {self._exceptions_database_id}")
+                    return
+                else:
+                    # Cached DB has wrong schema, clear cache and recreate
+                    logger.warning(f"Cached database {self._exceptions_database_id} has wrong schema (missing 'Error Type'), will recreate")
+                    self._exceptions_database_id = None
+            except Exception as e:
+                error_msg = str(e).lower()
+                # Check if it's a permission/access error - these should keep the cache
+                # The database exists, we just can't validate it right now
+                if "could not find" in error_msg or "access" in error_msg or "permission" in error_msg:
+                    logger.info(f"Using existing 'User Action Required' database: {self._exceptions_database_id} (unable to validate, assuming valid)")
+                    return
+                else:
+                    # Database truly doesn't exist anymore, clear cache
+                    logger.warning(f"Cached database {self._exceptions_database_id} no longer exists: {e}")
+                    logger.warning("Will search for existing database or create new one")
+                    self._exceptions_database_id = None
         
-        # Search for existing database - search ALL databases, then filter by parent
-        exceptions_page_id = self._exceptions_page_id
+        # Ensure Exceptions page exists first
+        exceptions_page_id = self.ensure_exceptions_page()
+        
+        # Check cache first
+        cached_db_id = self._cache.get_database_id("User Action Required")
+        if cached_db_id:
+            logger.info(f"Found 'User Action Required' database in cache file: {cached_db_id}")
+            # Verify it still exists and is accessible
+            try:
+                db_schema = self.wrapper.get_database(cached_db_id)
+                # Database exists and is accessible - trust the cache
+                logger.info(f"✓ Using cached database: {cached_db_id}")
+                self._exceptions_database_id = cached_db_id
+                self._cleanup_duplicate_databases()
+                return
+            except Exception as e:
+                error_msg = str(e).lower()
+                if "could not find" in error_msg or "object not found" in error_msg:
+                    logger.warning(f"Cached database not found: {e}")
+                    self._cache.clear_database("User Action Required")
+                else:
+                    # Other errors (like permissions) - keep using the cache
+                    logger.info(f"Using cached database (unable to verify): {cached_db_id}")
+                    self._exceptions_database_id = cached_db_id
+                    return
+        
+        # Search Notion for existing database - search ALL databases, then filter by parent
+        logger.info("Searching Notion for existing 'User Action Required' database...")
         databases = self.wrapper.search_pages("User Action Required", include_databases=True)
+        
+        # Filter out archived/deleted items (in_trash or archived=true)
+        active_databases = [
+            d for d in databases 
+            if d.get("object") == "database" 
+            and not d.get("archived", False)
+            and not d.get("in_trash", False)
+        ]
         
         # Look for any existing database with this name under the exceptions page
         found_db_id = None
-        for db in databases:
-            if db.get("object") == "database":
+        if len(active_databases) > 0:
+            logger.info(f"Found {len(active_databases)} active database(s) with name 'User Action Required', validating...")
+        else:
+            logger.info("No existing 'User Action Required' database found")
+            databases_in_trash = len(databases) - len(active_databases)
+            if databases_in_trash > 0:
+                logger.debug(f"  ({databases_in_trash} database(s) found in trash, ignoring)")
+        
+        for db in active_databases:
+                db_id = db["id"]
                 parent = db.get("parent", {})
+                parent_page_id = parent.get("page_id")
+                
+                logger.debug(f"  Checking database {db_id}, parent: {parent_page_id}")
+                
                 # Check if parent is the exceptions page
-                if parent.get("type") == "page_id" and parent.get("page_id") == exceptions_page_id:
-                    found_db_id = db["id"]
+                if parent.get("type") == "page_id" and parent_page_id == exceptions_page_id:
+                    logger.info(f"  ✓ Database {db_id} is under Exceptions page, validating schema...")
+                    found_db_id = db_id
                     # Verify it has the correct schema by checking for "Error Type" property
                     try:
                         db_schema = self.wrapper.get_database(found_db_id)
@@ -123,15 +234,21 @@ class ExceptionTracker:
                         if "Error Type" in properties:
                             self._exceptions_database_id = found_db_id
                             logger.info(f"Found existing 'User Action Required' database: {self._exceptions_database_id}")
+                            # Cache the database ID
+                            self._cache.set_database_id("User Action Required", self._exceptions_database_id)
+                            # Clean up duplicates immediately
+                            self._cleanup_duplicate_databases()
                             return
                         else:
                             # Database exists but has wrong schema - delete and recreate
-                            logger.warning(f"Found database with wrong schema, deleting: {found_db_id}")
+                            logger.warning(f"  ✗ Database has wrong schema (missing 'Error Type'), deleting: {found_db_id}")
                             self.wrapper.delete_block(found_db_id)
                             break
                     except Exception as e:
-                        logger.warning(f"Failed to check database schema: {e}")
+                        logger.warning(f"  ✗ Failed to validate database schema: {e}")
                         break
+                else:
+                    logger.debug(f"  Skipping database {db_id} (wrong parent)")
         
         # If we found databases with this name but under different parents, delete them
         # to avoid confusion (this handles the multiple databases issue)
@@ -165,6 +282,54 @@ class ExceptionTracker:
         )
         self._exceptions_database_id = db["id"]
         logger.info(f"Created 'User Action Required' database: {self._exceptions_database_id}")
+        
+        # Cache the database ID
+        self._cache.set_database_id("User Action Required", self._exceptions_database_id)
+        
+        # Wait for Notion to propagate the new database so search will find it
+        logger.debug("Waiting 5 seconds for database to propagate in Notion's search index...")
+        time.sleep(5)
+        
+        # Clean up any duplicates immediately after creation
+        self._cleanup_duplicate_databases()
+    
+    def _cleanup_duplicate_databases(self):
+        """Find and delete duplicate 'User Action Required' databases.
+        
+        Keeps only the database stored in self._exceptions_database_id and deletes
+        all others with the same name.
+        """
+        if not self._exceptions_database_id:
+            return
+        
+        logger.debug("Checking for duplicate 'User Action Required' databases...")
+        
+        try:
+            # Search for all databases with this name
+            databases = self.wrapper.search_pages("User Action Required", include_databases=True)
+            
+            duplicates_found = 0
+            for db in databases:
+                if db.get("object") == "database":
+                    db_id = db["id"]
+                    # Skip the one we're keeping
+                    if db_id == self._exceptions_database_id:
+                        continue
+                    
+                    # Delete any other database with this name
+                    try:
+                        self.wrapper.delete_block(db_id)
+                        duplicates_found += 1
+                        logger.info(f"Deleted duplicate 'User Action Required' database: {db_id}")
+                    except Exception as e:
+                        logger.warning(f"Failed to delete duplicate database {db_id}: {e}")
+            
+            if duplicates_found > 0:
+                logger.info(f"Cleaned up {duplicates_found} duplicate database(s)")
+            else:
+                logger.debug("No duplicate databases found")
+        except Exception as e:
+            logger.warning(f"Failed to check for duplicate databases: {e}")
     
     def add_exception_to_database(
         self,
@@ -172,7 +337,8 @@ class ExceptionTracker:
         note_title: str,
         page_id: str,
         error_type: str,
-        error_detail: str = ""
+        error_detail: str = "",
+        block_id: str = None
     ):
         """Add a user-actionable exception entry to the database.
         
@@ -182,7 +348,18 @@ class ExceptionTracker:
             page_id: Page ID of the note in Notion
             error_type: Type of error - must be one of: "File Upload Failed", "Invalid URL", "Table Split"
             error_detail: Additional details (e.g., filename, URL, etc.)
+            block_id: Optional block ID to link directly to the user action marker block
         """
+        # Verify the page exists and isn't trashed
+        try:
+            page = self.wrapper.client.pages.retrieve(page_id=page_id)
+            if page.get("archived") or page.get("in_trash"):
+                logger.debug(f"Skipping exception database entry for trashed/archived page: {note_title}")
+                return
+        except Exception as e:
+            logger.debug(f"Skipping exception database entry for inaccessible page {note_title}: {e}")
+            return
+        
         # Ensure database exists
         self.ensure_exceptions_page()
         if not self._exceptions_database_id:
@@ -198,8 +375,15 @@ class ExceptionTracker:
         safe_note_title = note_title[:80] if note_title else "Untitled"
         title_text = f"{safe_note_title}-{error_type.replace(' ', '')}-{count}"
         
-        # Create block link (direct link to page)
-        block_link = f"https://notion.so/{page_id.replace('-', '')}"
+        # Create block link - use block-level link if block_id provided, otherwise page-level
+        if block_id:
+            # Create direct block link: https://notion.so/<page_id_no_dashes>#<block_id_no_dashes>
+            clean_page_id = page_id.replace('-', '')
+            clean_block_id = block_id.replace('-', '')
+            block_link = f"https://notion.so/{clean_page_id}#{clean_block_id}"
+        else:
+            # Fall back to page-level link
+            block_link = f"https://notion.so/{page_id.replace('-', '')}"
         
         # Create database entry
         properties = {
@@ -239,8 +423,11 @@ class ExceptionTracker:
         page_title = f"{notebook_name}"
         logger.debug(f"Searching for existing exception page for '{page_title}'...")
         pages = self.wrapper.search_pages(page_title)
+        
+        # Filter out archived/deleted items
+        active_pages = [p for p in pages if not p.get("archived", False) and not p.get("in_trash", False)]
 
-        for page in pages:
+        for page in active_pages:
             if page.get("parent", {}).get("page_id") == exceptions_page_id:
                 page_id = page["id"]
                 self._notebook_exception_pages[notebook_name] = page_id
@@ -294,6 +481,16 @@ class ExceptionTracker:
             page_id: Notion page ID of the partially imported note
             errors: List of error messages
         """
+        # Verify the page exists and isn't trashed
+        try:
+            page = self.wrapper.client.pages.retrieve(page_id=page_id)
+            if page.get("archived") or page.get("in_trash"):
+                logger.debug(f"Skipping exception tracking for trashed/archived page: {note_title}")
+                return
+        except Exception as e:
+            logger.debug(f"Skipping exception tracking for inaccessible page {note_title}: {e}")
+            return
+        
         notebook_exception_page_id = self.ensure_notebook_exception_page(notebook_name)
 
         # Create blocks to append

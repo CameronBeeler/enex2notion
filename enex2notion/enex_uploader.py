@@ -302,7 +302,7 @@ def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_d
             if error_block_api:
                 api_blocks.insert(0, error_block_api)
 
-    # Upload blocks in batches
+    # Upload blocks in batches and track user action marker block IDs
     progress_iter = tqdm(
         iterable=range(0, len(api_blocks), 100),
         total=(len(api_blocks) + 99) // 100,
@@ -313,6 +313,7 @@ def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_d
 
     block_upload_error = None
     max_retries = 3
+    uploaded_blocks = []  # Store all uploaded block objects with IDs
     
     try:
         for start_idx in progress_iter:
@@ -321,7 +322,8 @@ def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_d
             # Retry logic for this batch
             for attempt in range(max_retries):
                 try:
-                    wrapper.append_blocks(block_id=page_id, children=batch)
+                    result = wrapper.append_blocks(block_id=page_id, children=batch)
+                    uploaded_blocks.extend(result)  # Store uploaded blocks with IDs
                     break  # Success - move to next batch
                 except Exception as batch_error:
                     is_last_attempt = (attempt == max_retries - 1)
@@ -366,4 +368,17 @@ def _upload_note(wrapper, root_id, note: EvernoteNote, note_blocks, errors, is_d
     else:
         logger.debug(f"Successfully uploaded note '{note.title}' with {len(api_blocks)} blocks")
     
-    return (page_id, has_errors, errors, failed_uploads)
+    # Map user action marker blocks to their block IDs
+    # This allows us to create direct block links in the exception database
+    user_action_blocks = {}  # Maps block index to block ID
+    for idx, uploaded_block in enumerate(uploaded_blocks):
+        # Check if this is a user action marker (callout with wrench emoji)
+        block_type = uploaded_block.get("type")
+        if block_type == "callout":
+            callout_data = uploaded_block.get("callout", {})
+            icon = callout_data.get("icon", {})
+            # Check for wrench emoji in icon
+            if icon.get("type") == "emoji" and icon.get("emoji") == "🔧":
+                user_action_blocks[idx] = uploaded_block["id"]
+    
+    return (page_id, has_errors, errors, failed_uploads, user_action_blocks)

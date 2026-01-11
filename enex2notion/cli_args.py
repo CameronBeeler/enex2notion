@@ -134,25 +134,50 @@ def parse_args(argv):
             "action": "store_true",
             "help": "like --condense-lines but leaves gaps between paragraphs",
         },
+        "--operations-dir": {
+            "type": Path,
+            "metavar": "DIR",
+            "help": (
+                "base directory for all operational files: done-file, summary, rejected-files, log, "
+                "unsupported-files, and infrastructure cache (enex2notion.txt). "
+                "If specified, all file paths use this as base unless overridden with absolute paths."
+            ),
+        },
         "--done-file": {
             "type": Path,
             "metavar": "FILE",
-            "help": "file for uploaded notes hashes to resume interrupted upload",
+            "help": (
+                "file for uploaded notes hashes to resume interrupted upload. "
+                "Default: operations-dir/done-{notebook}.txt if --operations-dir specified. "
+                "Absolute paths override operations-dir."
+            ),
         },
         "--summary": {
             "type": Path,
             "metavar": "FILE",
-            "help": "save import summary report to file (always printed to console)",
+            "help": (
+                "save import summary report to file (always printed to console). "
+                "Default: operations-dir/summary.txt if --operations-dir specified. "
+                "Absolute paths override operations-dir."
+            ),
         },
         "--rejected-files": {
             "type": Path,
             "metavar": "FILE",
-            "help": "save rejected/unsupported files report to CSV file",
+            "help": (
+                "save rejected/unsupported files report to CSV file. "
+                "Default: operations-dir/rejected-files.csv if --operations-dir specified. "
+                "Absolute paths override operations-dir."
+            ),
         },
         "--unsupported-files": {
             "type": Path,
             "metavar": "DIR",
-            "help": "directory to save files that Notion API rejects (organized by notebook/note)",
+            "help": (
+                "directory to save files that Notion API rejects (organized by notebook/note). "
+                "Default: operations-dir/unsupported-files/ if --operations-dir specified. "
+                "Absolute paths override operations-dir."
+            ),
         },
         "--note": {
             "help": "import only a specific note by exact title from ENEX file(s)",
@@ -166,7 +191,11 @@ def parse_args(argv):
         "--log": {
             "type": Path,
             "metavar": "FILE",
-            "help": "file to store program log",
+            "help": (
+                "file to store program log. "
+                "Default: operations-dir/enex2notion.log if --operations-dir specified. "
+                "Absolute paths override operations-dir."
+            ),
         },
         "--verbose": {
             "action": "store_true",

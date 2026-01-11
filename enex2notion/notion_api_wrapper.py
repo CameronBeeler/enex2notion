@@ -286,7 +286,7 @@ class NotionAPIWrapper:
 
         time.sleep(self._rate_limit_delay)
         
-        # Use raw requests API instead of notion-client due to library bug
+        # Use raw requests API instead of notion-client
         headers = {
             "Authorization": f"Bearer {self._auth_token}",
             "Content-Type": "application/json",
@@ -303,14 +303,15 @@ class NotionAPIWrapper:
             if response.status_code != 200:
                 error_data = response.json() if response.text else {}
                 error_msg = error_data.get("message", response.text)
-                # Raise as a generic Exception since APIResponseError expects a response object
                 raise Exception(f"Database creation failed (HTTP {response.status_code}): {error_msg}")
             return response
         
         response = self._retry_on_rate_limit(_create_db_request)
         
         result = response.json()
+        returned_properties = result.get('properties', {})
         logger.debug(f"Database created successfully with ID: {result.get('id')}")
+        logger.debug(f"Response contains {len(returned_properties)} properties: {list(returned_properties.keys())}")
         return result
 
     def append_blocks(

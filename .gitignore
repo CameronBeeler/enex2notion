@@ -1,6 +1,7 @@
 ### Custom ###
 .stuff/
 .local/
+enex2notion.txt  # Infrastructure cache file
 
 ### Python ###
 # Byte-compiled / optimized / DLL files

@@ -71,11 +71,10 @@ def _get_download_location(notion_block) -> str:
     return None
 
 
-def _create_failed_upload_placeholder(filename: str, file_type: str, download_location: str = None) -> list[dict[str, Any]]:
+def _create_failed_upload_placeholder(filename: str, file_type: str, download_location: str = None) -> dict[str, Any]:
     """Create a visible placeholder for a failed file upload.
     
-    This creates a distinctive marker that users can search for and includes
-    a JSON block with structured metadata for the exception.
+    This creates a distinctive marker that users can search for.
     
     Args:
         filename: Name of the file that failed to upload
@@ -83,10 +82,8 @@ def _create_failed_upload_placeholder(filename: str, file_type: str, download_lo
         download_location: Optional path where file was saved to disk
         
     Returns:
-        List of blocks: [callout marker, JSON metadata]
+        Callout block dict in API format
     """
-    import json
-    
     # Build message
     if download_location:
         message = f"📎 USER ACTION REQUIRED: File saved to disk\n"
@@ -121,29 +118,7 @@ def _create_failed_upload_placeholder(filename: str, file_type: str, download_lo
         }
     }
     
-    # Create JSON metadata block (collapsed by default, contains structured data)
-    metadata = {
-        "marker_type": "USER_ACTION_FILE_UPLOAD_FAILED",
-        "filename": filename,
-        "file_type": file_type,
-        "download_location": download_location,
-        "action_required": "manual_upload"
-    }
-    
-    json_block = {
-        "type": "code",
-        "code": {
-            "rich_text": [
-                {
-                    "type": "text",
-                    "text": {"content": json.dumps(metadata, indent=2)}
-                }
-            ],
-            "language": "json"
-        }
-    }
-    
-    return [callout, json_block]
+    return callout
 
 
 def _create_inline_warning_marker(message: str) -> dict[str, Any]:
@@ -332,8 +307,9 @@ def _convert_bookmark(notion_block) -> dict[str, Any]:
             }
         }
     
-    # Ensure URL has proper protocol
-    if not url.startswith(("http://", "https://")):
+    # Ensure URL has proper protocol (http://, https://, or custom schemes like evernote://)
+    # Only add https:// if there's no protocol at all (no ://)
+    if "://" not in url:
         logger.warning(f"Bookmark URL missing protocol: {url} - adding https://")
         url = f"https://{url}"
     
@@ -412,7 +388,7 @@ def _convert_image(notion_block) -> dict[str, Any]:
     
     if not file_upload_id:
         if upload_failed:
-            # Create a visible placeholder (list of marker blocks)
+            # Create a visible placeholder (single callout block)
             filename = _get_resource_filename(notion_block)
             download_loc = _get_download_location(notion_block)
             return _create_failed_upload_placeholder(filename, "image", download_loc)
@@ -430,14 +406,12 @@ def _convert_image(notion_block) -> dict[str, Any]:
     }
 
 
-def _convert_image_embed(notion_block) -> dict[str, Any] | list[dict[str, Any]]:
+def _convert_image_embed(notion_block) -> dict[str, Any]:
     """Convert external image embed block.
     
     Uses external type with the source URL.
     Let Notion's API validate the URL.
     """
-    import json
-    
     # Get source URL from block attributes
     source_url = notion_block.attrs.get("source") or notion_block.attrs.get("display_source")
     
@@ -445,7 +419,7 @@ def _convert_image_embed(notion_block) -> dict[str, Any] | list[dict[str, Any]]:
         logger.warning("Image embed block has no source URL - skipping")
         add_warning("Image embed missing source URL - needs manual review")
         
-        # Create user action required marker
+        # Create user action required marker (single callout block)
         callout = {
             "type": "callout",
             "callout": {
@@ -468,27 +442,7 @@ def _convert_image_embed(notion_block) -> dict[str, Any] | list[dict[str, Any]]:
             }
         }
         
-        # JSON metadata block
-        metadata = {
-            "marker_type": "USER_ACTION_MISSING_IMAGE_URL",
-            "issue": "Image embed has no source URL",
-            "action_required": "add_image_url_or_upload"
-        }
-        
-        json_block = {
-            "type": "code",
-            "code": {
-                "rich_text": [
-                    {
-                        "type": "text",
-                        "text": {"content": json.dumps(metadata, indent=2)}
-                    }
-                ],
-                "language": "json"
-            }
-        }
-        
-        return [callout, json_block]
+        return callout
     
     logger.debug(f"Creating external image embed with URL: {source_url}")
     
@@ -740,7 +694,7 @@ def _convert_pdf(notion_block) -> dict[str, Any]:
     
     if not file_upload_id:
         if upload_failed:
-            # Create a visible placeholder (list of marker blocks)
+            # Create a visible placeholder (single callout block)
             filename = _get_resource_filename(notion_block)
             download_loc = _get_download_location(notion_block)
             return _create_failed_upload_placeholder(filename, "PDF", download_loc)
@@ -770,7 +724,7 @@ def _convert_video(notion_block) -> dict[str, Any]:
     
     if not file_upload_id:
         if upload_failed:
-            # Create a visible placeholder (list of marker blocks)
+            # Create a visible placeholder (single callout block)
             filename = _get_resource_filename(notion_block)
             download_loc = _get_download_location(notion_block)
             return _create_failed_upload_placeholder(filename, "video", download_loc)
@@ -800,7 +754,7 @@ def _convert_audio(notion_block) -> dict[str, Any]:
     
     if not file_upload_id:
         if upload_failed:
-            # Create a visible placeholder (list of marker blocks)
+            # Create a visible placeholder (single callout block)
             filename = _get_resource_filename(notion_block)
             download_loc = _get_download_location(notion_block)
             return _create_failed_upload_placeholder(filename, "audio", download_loc)
@@ -830,7 +784,7 @@ def _convert_file(notion_block) -> dict[str, Any]:
     
     if not file_upload_id:
         if upload_failed:
-            # Create a visible placeholder (list of marker blocks)
+            # Create a visible placeholder (single callout block)
             filename = _get_resource_filename(notion_block)
             download_loc = _get_download_location(notion_block)
             return _create_failed_upload_placeholder(filename, "file", download_loc)
