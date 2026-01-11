@@ -131,6 +131,10 @@ options:
   --done-file FILE           file for uploaded notes hashes to resume interrupted upload
   --summary FILE             save import summary report to file (always printed to console)
   --rejected-files FILE      save rejected/unsupported files report to CSV file
+  --unsupported-files DIR    directory to save files that failed to upload (manual upload needed)
+  --operations-dir DIR       directory for operational files (done-file, summary, rejected-files, logs, cache)
+                             When specified, relative paths for --done-file, --summary, --rejected-files, --log,
+                             and --unsupported-files are resolved relative to this directory
   --log FILE                 file to store program log
   --verbose                  output debug information
   --version                  show program's version number and exit
@@ -210,6 +214,137 @@ To easily filter partial imports in your database:
 **Note**: Database views must be created manually in Notion - the API does not support programmatic view creation.
 
 Use `--summary FILE` to save the import report to a file.
+
+### Operations Directory & File Organization
+
+For complex migrations with multiple notebooks, use `--operations-dir` to centralize all operational files:
+
+```bash
+python -m enex2notion --use-env --mode DB --add-meta --condense-lines-sparse \
+  --operations-dir ~/Downloads/imports/output \
+  --unsupported-files ~/Downloads/imports/NotionDocuments/ \
+  --done-file done-<notebook-name>.txt \
+  --summary summary-<notebook-name>.txt \
+  --rejected-files rejected-<notebook-name>.txt \
+  ~/Downloads/imports/Notebooks/<notebook-name>.enex
+```
+
+**Directory Structure**:
+
+```
+~/Downloads/imports/
+├── Notebooks/              # Input: Your .enex files
+│   └── <notebook-name>.enex    # the enex file exported from Evernote
+├── output/                 # Operations directory (--operations-dir)
+│   ├── enex2notion.txt    # Infrastructure cache (auto-created)
+│   ├── done-<notebook-name>.txt 
+│   ├── summary-<notebook-name>.txt 
+│   ├── rejected-<notebook-name>.csv  # Rejected files report
+│   └── enex2notion.log    # (if --log specified)
+└── NotionDocuments/       # Failed uploads (--unsupported-files)
+    └── <notebook-name> /   # Per-notebook subdirectories
+        ├── document1.pdf
+        └── image2.png
+```
+
+**Key Files**:
+
+- **`enex2notion.txt`** (Infrastructure Cache)
+  - Auto-created in operations directory
+  - Stores IDs for "Exceptions" page and "User Action Required" database
+  - Shared across all imports to reuse infrastructure
+  - Tab-delimited format: `name<TAB>id`
+
+- **`done-*.txt`** (Progress Files)
+  - Tracks uploaded note hashes for resume capability
+  - Also stores database IDs for each notebook
+  - One file per notebook for parallel imports
+
+- **`summary-*.txt`** (Import Reports)
+  - Detailed statistics: total notes, success/failure rates, processing time
+  - Lists directories for failed uploads
+  - One file per notebook
+
+- **`rejected-*.csv`** (Rejected Files Report)
+  - Lists files that couldn't be uploaded (unsupported types, banned extensions)
+  - Includes notebook name, note title, filename, and reason
+
+- **Failed Upload Directories**
+  - Format: `<notebook-name>_<timestamp>_failed/`
+  - Contains files that failed to upload to Notion
+  - Referenced in "User Action Required" database for manual upload
+
+**Benefits**:
+- All operational files in one location for easy management
+- Shared infrastructure cache prevents duplicate databases
+- Clean separation between input (.enex), operations (logs/tracking), and output (failed files)
+- Supports parallel imports of multiple notebooks
+
+### Exception Tracking & User Action Required Database
+
+Every import automatically creates a maintenance system in Notion:
+
+**Structure in Notion UI**:
+```
+Evernote ENEX Import/          # Root page (--root-page)
+├── Exceptions/                # Auto-created summary page
+│   ├── User Action Required   # Database for actionable items
+│   └── <enex-notebook-name>   # one to many Pages that will include all non-actionable issues with the import of this note
+├── <notebook-1-name> /                  # Your imported notebooks
+├── <notebook-2-name> /
+└── <etc-etc-notebook-name> /
+```
+
+**User Action Required Database**:
+
+Tracks items requiring manual intervention with these properties:
+
+| Property | Type | Description |
+|----------|------|-------------| 
+| Title | Title | Auto-generated: `<note-title>-<error-type>-<count>` |
+| Import Source | Text | Source ENEX filename |
+| Notion Source Page | Text | Page title in Notion |
+| Resolved | Checkbox | Mark as done after fixing |
+| Error Type | Select | Type of issue: "File Upload Failed", "Invalid URL", "Table Split" |
+| Block Link | URL | Direct link to the issue in Notion (page or block level) |
+
+**Error Types**:
+
+1. **File Upload Failed**
+   - Files that couldn't be uploaded to Notion
+   - Saved to `--unsupported-files` directory
+   - Block Link points to the 🔧 user action marker in the page
+   - Error Detail shows filename and local path
+
+2. **Invalid URL**
+   - URLs with unsupported schemes (e.g., `mongodb://localhost`, `file://`)
+   - Marked inline with 🔗❌ icon in the page
+   - Block Link points to page level (search for URL in Error Detail)
+   - Evernote internal links (`evernote://`) are NOT treated as errors
+
+3. **Table Split**
+   - Tables exceeding Notion's limits (split into multiple tables)
+   - May need manual review or consolidation
+
+**Workflow**:
+
+1. **Import notebooks** - Exception tracking is automatic
+2. **Open "User Action Required" database** in Notion
+3. **Work through items**:
+   - Click Block Link to jump to the issue
+   - For file uploads: manually upload from `NotionDocuments/` directory
+   - For invalid URLs: fix or replace the link
+   - Check Resolved when done
+4. **Filter by Resolved** to see remaining items
+
+**Per-Notebook Exception Pages**:
+
+For informational errors (not requiring action), a child page is created under "Exceptions/" for each notebook listing:
+- Note titles with partial imports
+- Direct links to affected pages
+- Inline error callouts in each page describe what went wrong
+
+This system ensures **every note is imported** with clear tracking of any issues, making migration completion straightforward.
 
 ### Upload modes
 

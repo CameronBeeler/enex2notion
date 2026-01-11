@@ -32,6 +32,10 @@ def parse_args(argv):
             "action": "store_true",
             "help": "scan workspace and create DuplicatePageNames report without resolving links",
         },
+        "--retry-failed-links": {
+            "action": "store_true",
+            "help": "retry failed evernote:// link conversions with enhanced multi-link and parallel processing",
+        },
         "--page": {
             "help": (
                 "(resolve-links only) analyze only a specific page by name"
@@ -79,7 +83,13 @@ def parse_args(argv):
         "--limit": {
             "type": int,
             "metavar": "N",
-            "help": "(resolve-links only) process at most N pages from the queue in this run",
+            "help": "(resolve-links/retry-failed-links) process at most N pages from the queue in this run",
+        },
+        "--workers": {
+            "type": int,
+            "default": 4,
+            "metavar": "N",
+            "help": "(retry-failed-links only) number of parallel workers for processing pages (default: 4)",
         },
         "--token": {
             "help": (
@@ -235,6 +245,16 @@ def parse_args(argv):
             )
         args.command = "resolve-links"
         # Set enex_input to None in resolve-links mode (not used)
+        args.enex_input = None
+    elif args.retry_failed_links:
+        # Retry-failed-links mode: token is required, enex_input is not
+        if not args.token:
+            parser.error(
+                "--token or --use-env is required for --retry-failed-links.\n"
+                "Create an Integration token at https://www.notion.com/my-integrations"
+            )
+        args.command = "retry-failed-links"
+        # Set enex_input to None (not used)
         args.enex_input = None
     elif args.check_duplicates:
         # Check-duplicates mode: token is required, enex_input is not

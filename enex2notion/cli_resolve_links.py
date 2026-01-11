@@ -15,6 +15,7 @@ from enex2notion.link_resolution_report import (
 from enex2notion.link_resolver import (
     find_evernote_links_in_page,
     create_updated_rich_text,
+    validate_target_page,
 )
 from enex2notion.notion_api_wrapper import NotionAPIWrapper, _extract_page_title
 from enex2notion.page_inventory_tracker import PageInventoryTracker
@@ -383,6 +384,9 @@ def resolve_links_command(wrapper: NotionAPIWrapper, root_id: str, args):
             logger.warning(f"Failed to get parent info for {page_id}: {e}")
             return "Unknown"
 
+    # Initialize validation cache for target pages
+    validation_cache = {}
+    
     # Group found link refs by page
     refs_by_page = {}
     for ref in all_link_refs:
@@ -393,12 +397,20 @@ def resolve_links_command(wrapper: NotionAPIWrapper, root_id: str, args):
         page_matched = []
         page_unmatched = []
         page_ambig = []
+        page_invalid_target = []  # Links with invalid/archived target pages
+        
         # Match within this page
         for link_ref in page_refs:
             key = _norm(link_ref.link_text or "")
             candidates = title_to_ids_ci.get(key, [])
             if len(candidates) == 1:
-                page_matched.append((link_ref, candidates[0][0]))
+                # Validate target page before accepting match
+                target_id = candidates[0][0]
+                if validate_target_page(wrapper, target_id, validation_cache):
+                    page_matched.append((link_ref, target_id))
+                else:
+                    # Target exists in title map but page is archived/trashed
+                    page_invalid_target.append((link_ref, target_id, candidates[0][1]))
             elif len(candidates) > 1:
                 page_ambig.append((link_ref, candidates))
             else:
@@ -411,10 +423,12 @@ def resolve_links_command(wrapper: NotionAPIWrapper, root_id: str, args):
             link_lookup = {}
             for ref, mid in page_matched:
                 link_lookup[_norm(ref.link_text or "")] = mid
-            # Ambiguous and unmatched get None
+            # Ambiguous, unmatched, and invalid targets get None
             for ref, cands in page_ambig:
                 link_lookup[_norm(ref.link_text or "")] = None
             for ref in page_unmatched:
+                link_lookup[_norm(ref.link_text or "")] = None
+            for ref, tgt_id, tgt_title in page_invalid_target:
                 link_lookup[_norm(ref.link_text or "")] = None
             
             # Group ALL page refs by (block_id, rich_text_index)
@@ -490,8 +504,13 @@ def resolve_links_command(wrapper: NotionAPIWrapper, root_id: str, args):
                             if tgt_id:  # Successfully resolved
                                 continue
                             
-                            # Determine if ambiguous or unresolved
-                            status_row = "Ambiguous" if any(r[0] == ref for r in [*page_ambig]) else "Unresolved"
+                            # Determine status: Ambiguous, Target Missing, or Unresolved
+                            if any(r[0] == ref for r in [*page_ambig]):
+                                status_row = "Ambiguous"
+                            elif any(r[0] == ref for r in [*page_invalid_target]):
+                                status_row = "Target Missing"
+                            else:
+                                status_row = "Unresolved"
                             
                             review.log_link(
                                 link_text=ref.link_text,

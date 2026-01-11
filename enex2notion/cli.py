@@ -8,6 +8,7 @@ from enex2notion.cli_notion import get_root
 from enex2notion.cli_requirements import validate_python_version, validate_requirements, check_optional_tools
 from enex2notion.cli_check_duplicates import check_duplicates_command
 from enex2notion.cli_resolve_links import resolve_links_command
+from enex2notion.cli_retry_failed_links import retry_failed_links_command
 from enex2notion.cli_upload import EnexUploader
 from enex2notion.rejected_files_tracker import RejectedFilesTracker
 from enex2notion.summary_report import ImportSummary, print_report, save_report
@@ -29,6 +30,8 @@ def cli(argv):
     # Route to appropriate command
     if hasattr(args, "command") and args.command == "resolve-links":
         _resolve_links_cli(args)
+    elif hasattr(args, "command") and args.command == "retry-failed-links":
+        _retry_failed_links_cli(args)
     elif hasattr(args, "command") and args.command == "check-duplicates":
         _check_duplicates_cli(args)
     else:
@@ -207,6 +210,19 @@ def _resolve_links_cli(args):
     
     # Execute link resolution
     resolve_links_command(wrapper, root_id, args)
+
+
+def _retry_failed_links_cli(args):
+    """Execute the retry-failed-links command."""
+    logger.info("=" * 80)
+    logger.info("RETRY FAILED EVERNOTE LINKS COMMAND")
+    logger.info("=" * 80)
+    
+    # Validate token and get root page
+    wrapper, root_id = get_root(args.token, args.root_page)
+    
+    # Execute retry failed links
+    retry_failed_links_command(wrapper, root_id, args)
 
 
 def _check_duplicates_cli(args):

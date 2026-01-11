@@ -98,6 +98,7 @@ class ReviewTracker:
                 {"name": "Resolved", "color": "green"},
                 {"name": "Partial", "color": "yellow"},
                 {"name": "Ambiguous", "color": "orange"},
+                {"name": "Target Missing", "color": "purple"},
                 {"name": "Unresolved", "color": "red"}
             ]}},
             "Processed At": {"date": {}},

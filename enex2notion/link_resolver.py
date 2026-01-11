@@ -55,6 +55,39 @@ def remove_hyphens(page_id: str) -> str:
     return page_id.replace("-", "")
 
 
+def validate_target_page(wrapper, page_id: str, validation_cache: dict[str, bool] | None = None) -> bool:
+    """Validate that a target page exists and is accessible.
+    
+    Args:
+        wrapper: NotionAPIWrapper instance
+        page_id: Page ID to validate
+        validation_cache: Optional cache dict to avoid redundant API calls
+    
+    Returns:
+        True if page exists and is not archived/trashed, False otherwise
+    """
+    # Check cache first
+    if validation_cache is not None and page_id in validation_cache:
+        return validation_cache[page_id]
+    
+    try:
+        page = wrapper.client.pages.retrieve(page_id=page_id)
+        is_valid = not (page.get("archived", False) or page.get("in_trash", False))
+        
+        # Cache result
+        if validation_cache is not None:
+            validation_cache[page_id] = is_valid
+        
+        logger.debug(f"Validated page {page_id}: {is_valid}")
+        return is_valid
+    except Exception as e:
+        logger.warning(f"Failed to validate page {page_id}: {e}")
+        # Cache negative result to avoid repeated failures
+        if validation_cache is not None:
+            validation_cache[page_id] = False
+        return False
+
+
 def count_total_evernote_markdown_links(blocks: list[dict[str, Any]]) -> int:
     """Count total number of markdown evernote links in page for validation.
     
