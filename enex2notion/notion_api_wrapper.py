@@ -516,7 +516,7 @@ class NotionAPIWrapper:
         return title_map
     
     def list_all_pages_batched(
-        self, root_id: str, batch_size: int = 500, batch_callback=None
+        self, root_id: str, batch_size: int = 500, batch_callback=None, exclude_db_titles=None, exclude_page_titles=None
     ) -> dict[str, str]:
         """Recursively collect all pages with batched callbacks.
         
@@ -524,6 +524,8 @@ class NotionAPIWrapper:
             root_id: Root page ID to start traversal
             batch_size: Number of pages per batch before calling callback
             batch_callback: Optional callback function(batch_map) called every batch_size pages
+            exclude_db_titles: Optional set of database titles to skip expanding
+            exclude_page_titles: Optional set of page titles to skip (and all their children)
         
         Returns:
             Complete dictionary mapping page title to page ID
@@ -555,19 +557,36 @@ class NotionAPIWrapper:
                     
                     if block_type == "child_page":
                         child_id = block["id"]
+                        # Get page title to check if it should be excluded
+                        child_title = block.get("child_page", {}).get("title", "")
+                        
+                        if exclude_page_titles and child_title in exclude_page_titles:
+                            print(f"  ⊗ Skipping page and all its children: {child_title}")
+                            logger.info(f"Skipping page (and children): {child_title}")
+                            # Don't add to results, don't recurse
+                            continue
+                        
                         _collect_with_batching(child_id)
                     
                     elif block_type == "child_database":
                         db_id = block["id"]
                         db_title = block.get("child_database", {}).get("title", "")
-                        all_pages[db_id] = db_title
-                        batch[db_id] = db_title
                         
-                        if len(batch) >= batch_size and batch_callback:
-                            batch_callback(batch.copy())
-                            batch.clear()
-                        
-                        self._list_database_pages_batched(db_id, all_pages, batch, batch_size, batch_callback)
+                        # Check if this database should be excluded
+                        if exclude_db_titles and db_title in exclude_db_titles:
+                            print(f"  ⊗ Skipping maintenance database: {db_title}")
+                            logger.info(f"Skipping maintenance database: {db_title}")
+                            all_pages[db_id] = db_title
+                            batch[db_id] = db_title
+                        else:
+                            all_pages[db_id] = db_title
+                            batch[db_id] = db_title
+                            
+                            if len(batch) >= batch_size and batch_callback:
+                                batch_callback(batch.copy())
+                                batch.clear()
+                            
+                            self._list_database_pages_batched(db_id, all_pages, batch, batch_size, batch_callback, exclude_db_titles)
             
             except APIResponseError as e:
                 logger.warning(f"Failed to traverse page {page_id}: {e}")
@@ -582,12 +601,17 @@ class NotionAPIWrapper:
         return all_pages
     
     def list_all_accessible_pages_batched(
-        self, batch_size: int = 500, batch_callback=None
+        self, batch_size: int = 500, batch_callback=None, exclude_db_titles=None
     ) -> dict[str, str]:
         """Enumerate all pages and databases accessible to the integration.
 
         Uses the Notion search API (no query) to page through all accessible objects,
         then expands each database to include all of its records.
+
+        Args:
+            batch_size: Number of pages per batch
+            batch_callback: Optional callback for batched results
+            exclude_db_titles: Optional set of database titles to skip expanding (and their children)
 
         Returns id->title map.
         """
@@ -607,15 +631,30 @@ class NotionAPIWrapper:
                         title = _extract_page_title(obj) or ""
                         all_pages[obj_id] = title
                         batch[obj_id] = title
+                        
+                        # Selectively recurse into pages that are known to contain maintenance databases
+                        # This avoids recursing into all 8000+ pages (which would be very slow)
+                        CONTAINER_PAGES = {"Exceptions"}  # Pages that contain child databases
+                        if title in CONTAINER_PAGES:
+                            self._collect_pages_recursive_batched(obj_id, all_pages, batch, batch_size, batch_callback, exclude_db_titles)
                     elif obj_type == "database":
                         # capture database title and expand records
                         tarr = obj.get("title", [])
                         if tarr:
                             title = tarr[0].get("plain_text", "")
-                        all_pages[obj_id] = title
-                        batch[obj_id] = title
-                        # expand database records
-                        self._list_database_pages_batched(obj_id, all_pages, batch, batch_size, batch_callback)
+                        
+                        # Check if this database should be excluded
+                        if exclude_db_titles and title in exclude_db_titles:
+                            print(f"  ⊗ Skipping maintenance database: {title}")
+                            logger.info(f"Skipping maintenance database: {title}")
+                            # Still add the database itself, but don't expand its children
+                            all_pages[obj_id] = title
+                            batch[obj_id] = title
+                        else:
+                            all_pages[obj_id] = title
+                            batch[obj_id] = title
+                            # expand database records (this includes all rows)
+                            self._list_database_pages_batched(obj_id, all_pages, batch, batch_size, batch_callback, exclude_db_titles)
                     # flush batch
                     if len(batch) >= batch_size and batch_callback:
                         batch_callback(batch.copy())
@@ -631,7 +670,7 @@ class NotionAPIWrapper:
         return all_pages
 
     def _list_database_pages_batched(
-        self, database_id: str, all_pages: dict, batch: dict, batch_size: int, batch_callback
+        self, database_id: str, all_pages: dict, batch: dict, batch_size: int, batch_callback, exclude_db_titles=None
     ):
         """List database pages with batching support."""
         start_cursor = None
@@ -679,7 +718,7 @@ class NotionAPIWrapper:
                         batch.clear()
                     
                     # Recurse into database page (using batched version)
-                    self._collect_pages_recursive_batched(page_id, all_pages, batch, batch_size, batch_callback)
+                    self._collect_pages_recursive_batched(page_id, all_pages, batch, batch_size, batch_callback, exclude_db_titles)
                 
                 if not data.get("has_more"):
                     break
@@ -690,7 +729,7 @@ class NotionAPIWrapper:
                 break
     
     def _collect_pages_recursive_batched(
-        self, page_id: str, all_pages: dict, batch: dict, batch_size: int, batch_callback
+        self, page_id: str, all_pages: dict, batch: dict, batch_size: int, batch_callback, exclude_db_titles=None
     ):
         """Helper for recursive batched collection."""
         try:
@@ -709,19 +748,28 @@ class NotionAPIWrapper:
                         batch_callback(batch.copy())
                         batch.clear()
                     
-                    self._collect_pages_recursive_batched(child_id, all_pages, batch, batch_size, batch_callback)
+                    self._collect_pages_recursive_batched(child_id, all_pages, batch, batch_size, batch_callback, exclude_db_titles)
                 
                 elif block_type == "child_database":
                     db_id = block["id"]
                     db_title = block.get("child_database", {}).get("title", "")
-                    all_pages[db_id] = db_title
-                    batch[db_id] = db_title
                     
-                    if len(batch) >= batch_size and batch_callback:
-                        batch_callback(batch.copy())
-                        batch.clear()
-                    
-                    self._list_database_pages_batched(db_id, all_pages, batch, batch_size, batch_callback)
+                    # Check if this database should be excluded
+                    if exclude_db_titles and db_title in exclude_db_titles:
+                        print(f"  ⊗ Skipping maintenance database: {db_title}")
+                        logger.info(f"Skipping maintenance database: {db_title}")
+                        # Still add the database itself, but don't expand its children
+                        all_pages[db_id] = db_title
+                        batch[db_id] = db_title
+                    else:
+                        all_pages[db_id] = db_title
+                        batch[db_id] = db_title
+                        
+                        if len(batch) >= batch_size and batch_callback:
+                            batch_callback(batch.copy())
+                            batch.clear()
+                        
+                        self._list_database_pages_batched(db_id, all_pages, batch, batch_size, batch_callback, exclude_db_titles)
         
         except APIResponseError as e:
             logger.warning(f"Failed to traverse page {page_id}: {e}")

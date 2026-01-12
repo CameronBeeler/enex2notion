@@ -87,9 +87,9 @@ def parse_args(argv):
         },
         "--workers": {
             "type": int,
-            "default": 4,
+            "default": 3,
             "metavar": "N",
-            "help": "(retry-failed-links only) number of parallel workers for processing pages (default: 4)",
+            "help": "(resolve-links/retry-failed-links) number of parallel workers for processing pages (default: 3, optimal: 2-3)",
         },
         "--token": {
             "help": (

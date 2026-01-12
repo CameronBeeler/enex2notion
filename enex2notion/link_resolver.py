@@ -37,14 +37,18 @@ EVERNOTE_URL_PATTERN = re.compile(r'evernote[a-zA-Z0-9\-._~:/?#\[\]@!$&\'()*+,;=
 
 @dataclass
 class LinkReference:
-    """Reference to an evernote:// link found in a block."""
+    """Reference to an evernote:// link found in a block.
+    
+    For table_row blocks, rich_text_index is a string "cell_idx:rt_idx",
+    for regular blocks it's an int.
+    """
     page_id: str
     page_title: str
     block_id: str
     block_type: str
     link_text: str
     original_url: str
-    rich_text_index: int
+    rich_text_index: int | str  # int for regular blocks, "cell:rt" string for table_row
     rich_text_item: dict[str, Any]
     pass_type: str  # "markdown" or "href"
     has_unresolved_marker: bool = False  # True if "🛑 unresolved: " prefix exists
@@ -287,13 +291,78 @@ def find_evernote_links_in_page(
     return links
 
 
+def _scan_table_row_for_links(page_id: str, page_title: str, block: dict[str, Any]) -> list[LinkReference]:
+    """Scan a table_row block for evernote:// links in its cells.
+    
+    Table rows have structure: {"table_row": {"cells": [[rich_text], [rich_text], ...]}}
+    """
+    block_id = block.get("id")
+    cells = block.get("table_row", {}).get("cells", [])
+    
+    links = []
+    for cell_idx, cell_rich_text in enumerate(cells):
+        # Each cell is a rich_text array
+        for rt_idx, rich_text_item in enumerate(cell_rich_text):
+            if rich_text_item.get("type") != "text":
+                continue
+            
+            text_content = rich_text_item.get("text", {}).get("content", "")
+            href = rich_text_item.get("href", "")
+            
+            # PASS 1: Markdown links
+            markdown_pattern = r'\[([^\]]*)\]\((evernote[a-zA-Z0-9\-._~:/?#\[\]@!$&\'()*+,;=%]*)\)'
+            markdown_matches = list(re.finditer(markdown_pattern, text_content))
+            
+            if markdown_matches:
+                for match in markdown_matches:
+                    note_name = match.group(1)
+                    url = match.group(2)
+                    
+                    # Check for unresolved marker
+                    has_unresolved_marker = False
+                    marker_prefix = "🛑 unresolved: "
+                    check_start = max(0, match.start() - len(marker_prefix))
+                    prefix_text = text_content[check_start:match.start()]
+                    if prefix_text == marker_prefix:
+                        has_unresolved_marker = True
+                    
+                    # Store cell_index as part of rich_text_index for table rows
+                    # Format: (cell_idx, rt_idx) stored as string "cell:rt"
+                    links.append(LinkReference(
+                        page_id=page_id, page_title=page_title, block_id=block_id,
+                        block_type="table_row", link_text=note_name, original_url=url,
+                        rich_text_index=f"{cell_idx}:{rt_idx}",  # Special format for table cells
+                        rich_text_item=rich_text_item, pass_type="markdown",
+                        has_unresolved_marker=has_unresolved_marker,
+                    ))
+                    logger.debug(f"Table cell [{cell_idx},{rt_idx}]: [{note_name}]({url})")
+            
+            # PASS 2: href links
+            elif href and EVERNOTE_URL_PATTERN.match(href):
+                note_name = rich_text_item.get("plain_text", text_content)
+                links.append(LinkReference(
+                    page_id=page_id, page_title=page_title, block_id=block_id,
+                    block_type="table_row", link_text=note_name, original_url=href,
+                    rich_text_index=f"{cell_idx}:{rt_idx}",
+                    rich_text_item=rich_text_item, pass_type="href",
+                ))
+                logger.debug(f"Table cell [{cell_idx},{rt_idx}] href: '{note_name}' -> {href}")
+    
+    return links
+
+
 def _scan_block_for_links(page_id: str, page_title: str, block: dict[str, Any]) -> list[LinkReference]:
     """Scan a single block for evernote:// links (two passes).
     
     Finds ALL links using finditer to support multiple links per rich_text element.
+    Supports both regular blocks and table_row cells.
     """
     block_type = block.get("type")
     block_id = block.get("id")
+    
+    # Handle table_row blocks specially (they have cells, not rich_text)
+    if block_type == "table_row":
+        return _scan_table_row_for_links(page_id, page_title, block)
     
     if not block_type or block_type not in RICH_TEXT_BLOCK_TYPES:
         return []

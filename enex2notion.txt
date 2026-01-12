@@ -1,0 +1,5 @@
+# enex2notion infrastructure cache
+# Format: name<TAB>id
+# Do not edit manually
+
+Exceptions	2e536504-73e9-81bd-b150-f0690017b748
